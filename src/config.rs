@@ -29,6 +29,8 @@ pub struct Config {
     pub auto_update_app: bool,
     /// ingrandimento dell'interfaccia (1.0 = normale)
     pub ui_scale: f32,
+    /// dove cerca la barra di ricerca (YouTube o una sezione di YouTube Music)
+    pub search_source: crate::search::Source,
 }
 
 impl Default for Config {
@@ -52,6 +54,7 @@ impl Default for Config {
             cookies_browser: String::new(),
             auto_update_app: true,
             ui_scale: 1.0,
+            search_source: Default::default(),
         }
     }
 }

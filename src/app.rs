@@ -102,6 +102,7 @@ struct SearchUi {
     query: String,
     /// testo cercato per ultimo (per il messaggio «nessun risultato»)
     last_query: String,
+    last_source: search::Source,
     results: Vec<SearchResult>,
     /// risultati spuntati per scaricarli insieme (stessi indici di `results`)
     selected: Vec<bool>,
@@ -307,10 +308,12 @@ impl App {
         let seq = self.search.seq;
         let toolset = self.toolset();
         let cookies = self.cfg.cookies_browser.clone();
+        let source = self.cfg.search_source;
+        self.search.last_source = source;
         let send = self.sender(ctx);
         thread::spawn(move || {
-            let result =
-                search::search(&query, &toolset, &cookies, &cancel).map_err(|e| format!("{e:#}"));
+            let result = search::search(source, &query, &toolset, &cookies, &cancel)
+                .map_err(|e| format!("{e:#}"));
             send(Msg::SearchDone { seq, result });
         });
     }
@@ -685,7 +688,27 @@ impl App {
         let mut clear = false;
 
         card(ui, |ui| {
-            let title_id = ui.label(RichText::new(tr!("Cerca", "Search")).strong()).id;
+            let mut title_id = None;
+            ui.horizontal(|ui| {
+                title_id = Some(ui.label(RichText::new(tr!("Cerca", "Search")).strong()).id);
+                ui.label(tr!("su", "on"));
+                let before = self.cfg.search_source;
+                egui::ComboBox::from_id_salt("search_source")
+                    .selected_text(self.cfg.search_source.label())
+                    .show_ui(ui, |ui| {
+                        for src in search::Source::ALL {
+                            ui.selectable_value(&mut self.cfg.search_source, src, src.label());
+                        }
+                    });
+                if self.cfg.search_source != before {
+                    self.cfg.save();
+                    // cambiando sorgente si ripete subito la ricerca già fatta
+                    if !self.search.last_query.is_empty() && ready {
+                        self.search.query = self.search.last_query.clone();
+                        do_search = true;
+                    }
+                }
+            });
             ui.horizontal(|ui| {
                 let btn_w = if self.search.busy { 190.0 } else { 90.0 };
                 let resp = ui.add(
@@ -697,7 +720,10 @@ impl App {
                             "Artist and song title, or the name of a video"
                         )),
                 );
-                let resp = resp.labelled_by(title_id);
+                let resp = match title_id {
+                    Some(id) => resp.labelled_by(id),
+                    None => resp,
+                };
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     do_search = true;
                 }
@@ -723,6 +749,18 @@ impl App {
                     RichText::new(tr!(
                         "La ricerca sarà disponibile appena yt-dlp è pronto.",
                         "Search will be available as soon as yt-dlp is ready."
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if self.cfg.search_source != search::Source::YouTube
+                && self.cfg.cookies_browser.is_empty()
+            {
+                ui.label(
+                    RichText::new(tr!(
+                        "Per usare il tuo account Google, scegli il browser in cui hai fatto l'accesso in «Opzioni avanzate → Usa i cookie del browser».",
+                        "To use your Google account, pick the browser you are signed in with in “Advanced options → Use browser cookies”."
                     ))
                     .small()
                     .color(ui.visuals().weak_text_color()),
@@ -765,13 +803,15 @@ impl App {
             ui.label(
                 RichText::new(tr!(
                     format!(
-                        "{} risultati per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
+                        "{} risultati su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
                         res.len(),
+                        self.search.last_source.label(),
                         self.search.last_query
                     ),
                     format!(
-                        "{} results for “{}” · “Download” saves them {what}, with the options below.",
+                        "{} results on {} for “{}” · “Download” saves them {what}, with the options below.",
                         res.len(),
+                        self.search.last_source.label(),
                         self.search.last_query
                     )
                 ))
@@ -808,10 +848,14 @@ impl App {
                                     can_download,
                                     egui::Button::new(tr!("Scarica", "Download")).small(),
                                 )
-                                .on_hover_text(tr!(
-                                    "Scarica subito questo risultato",
-                                    "Download this result now"
-                                ));
+                                .on_hover_text(if r.collection {
+                                    tr!(
+                                        "Scarica subito tutto l'album o la playlist, in una cartella con il suo nome",
+                                        "Download the whole album or playlist now, in a folder with its name"
+                                    )
+                                } else {
+                                    tr!("Scarica subito questo risultato", "Download this result now")
+                                });
                             dl.widget_info(|| {
                                 egui::WidgetInfo::labeled(
                                     egui::Role::Button,
@@ -848,6 +892,9 @@ impl App {
                                 )
                                 .on_hover_text(&r.title);
                                 let mut meta: Vec<String> = Vec::new();
+                                if r.collection {
+                                    meta.push(tr!("Album / playlist", "Album / playlist").into());
+                                }
                                 if !r.channel.is_empty() {
                                     meta.push(r.channel.clone());
                                 }

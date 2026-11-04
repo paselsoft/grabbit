@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Ricerca su YouTube tramite yt-dlp (`ytsearchN:`), senza scaricare nulla:
-//! restituisce titolo, canale, durata e link dei primi risultati.
+//! Ricerca su YouTube e YouTube Music tramite yt-dlp, senza scaricare nulla:
+//! restituisce titolo, canale/artista, durata e link dei primi risultati.
+//!
+//! - YouTube: `ytsearchN:testo`
+//! - YouTube Music: `https://music.youtube.com/search?q=testo#songs` (o `#albums`,
+//!   `#videos`): la sezione dopo `#` è quella che yt-dlp legge dalla pagina dei risultati.
 use crate::downloader::{terminate, Toolset};
 use crate::tools;
 use crate::tr;
 use anyhow::{anyhow, bail, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::Read;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +20,64 @@ use std::time::{Duration, Instant};
 pub const RESULTS: usize = 15;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Dove cercare.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Source {
+    #[default]
+    YouTube,
+    MusicSongs,
+    MusicAlbums,
+    MusicVideos,
+}
+
+impl Source {
+    pub const ALL: [Source; 4] = [
+        Source::YouTube,
+        Source::MusicSongs,
+        Source::MusicAlbums,
+        Source::MusicVideos,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Source::YouTube => "YouTube",
+            Source::MusicSongs => tr!("YouTube Music · brani", "YouTube Music · songs"),
+            Source::MusicAlbums => tr!("YouTube Music · album", "YouTube Music · albums"),
+            Source::MusicVideos => tr!("YouTube Music · video", "YouTube Music · videos"),
+        }
+    }
+
+    /// Cosa passare a yt-dlp per cercare `query`.
+    pub fn target(self, query: &str, count: usize) -> String {
+        let q = query.trim();
+        let section = match self {
+            Source::YouTube => return format!("ytsearch{count}:{q}"),
+            Source::MusicSongs => "songs",
+            Source::MusicAlbums => "albums",
+            Source::MusicVideos => "videos",
+        };
+        format!(
+            "https://music.youtube.com/search?q={}#{section}",
+            encode_query(q)
+        )
+    }
+}
+
+/// Codifica il testo per l'indirizzo di ricerca (spazi come `+`, il resto in %XX).
+fn encode_query(q: &str) -> String {
+    let mut out = String::new();
+    for b in q.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchResult {
     pub title: String,
@@ -22,24 +85,14 @@ pub struct SearchResult {
     /// secondi
     pub duration: Option<f64>,
     pub views: Option<u64>,
-    /// link da scaricare (pagina del video)
+    /// link da scaricare (pagina del video, oppure dell'album/playlist)
     pub url: String,
-}
-
-/// Una riga di `--print "%(.{…})j"`: un oggetto JSON per risultato.
-#[derive(Deserialize)]
-struct Raw {
-    id: Option<String>,
-    title: Option<String>,
-    channel: Option<String>,
-    uploader: Option<String>,
-    duration: Option<f64>,
-    view_count: Option<u64>,
-    url: Option<String>,
-    webpage_url: Option<String>,
+    /// album o playlist: si scarica tutto, in una cartella con il suo nome
+    pub collection: bool,
 }
 
 pub fn build_args(
+    source: Source,
     query: &str,
     count: usize,
     tools: &Toolset,
@@ -53,7 +106,7 @@ pub fn build_args(
         "--color",
         "never",
         "--print",
-        "%(.{id,title,channel,uploader,duration,view_count,url,webpage_url})j",
+        "%(.{id,title,channel,uploader,artist,artists,creator,duration,view_count,url,webpage_url,ie_key,_type})j",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -66,46 +119,87 @@ pub fn build_args(
         a.push("--cookies-from-browser".into());
         a.push(cookies_browser.into());
     }
+    if source != Source::YouTube {
+        // la pagina dei risultati di YouTube Music non ha un limite: lo mette yt-dlp
+        a.push("--playlist-items".into());
+        a.push(format!("1:{count}"));
+    }
     // "--": una ricerca che comincia con "-" non diventa un'opzione di yt-dlp
     a.push("--".into());
-    a.push(format!("ytsearch{count}:{}", query.trim()));
+    a.push(source.target(query, count));
     a
 }
 
+/// Legge una riga di `--print "%(.{…})j"`: un oggetto JSON per risultato.
+/// Si usa `Value` e non una struttura rigida: i campi cambiano tra YouTube e YouTube Music
+/// (e tra versioni di yt-dlp), e un campo di tipo inatteso non deve far sparire il risultato.
 pub fn parse_line(line: &str) -> Option<SearchResult> {
-    let raw: Raw = serde_json::from_str(line.trim()).ok()?;
-    let url = raw
-        .webpage_url
-        .filter(|u| u.starts_with("http"))
-        .or_else(|| raw.url.filter(|u| u.starts_with("http")))
-        .or_else(|| {
-            raw.id
-                .as_deref()
-                .filter(|id| !id.is_empty())
-                .map(|id| format!("https://www.youtube.com/watch?v={id}"))
-        })?;
-    let title = raw
-        .title
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| url.clone());
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "NA")
+            .map(String::from)
+    };
+    let http = |k: &str| text(k).filter(|u| u.starts_with("http"));
+    let url = http("webpage_url").or_else(|| http("url")).or_else(|| {
+        text("id")
+            .filter(|id| id.len() == 11) // id di un video YouTube
+            .map(|id| format!("https://www.youtube.com/watch?v={id}"))
+    })?;
+    let title = text("title").unwrap_or_else(|| url.clone());
+    let artists = v
+        .get("artists")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty());
+    let channel = artists
+        .or_else(|| text("artist"))
+        .or_else(|| text("creator"))
+        .or_else(|| text("channel"))
+        .or_else(|| text("uploader"))
+        .unwrap_or_default();
+    let collection = text("_type").is_some_and(|t| t == "playlist")
+        || text("ie_key").is_some_and(|k| k.contains("Tab") || k.contains("Playlist"))
+        || is_collection_url(&url);
     Some(SearchResult {
         title,
-        channel: raw.channel.or(raw.uploader).unwrap_or_default(),
-        duration: raw.duration.filter(|d| *d > 0.0),
-        views: raw.view_count,
+        channel,
+        duration: v
+            .get("duration")
+            .and_then(Value::as_f64)
+            .filter(|d| *d > 0.0),
+        views: v
+            .get("view_count")
+            .and_then(|n| n.as_u64().or_else(|| n.as_f64().map(|f| f as u64))),
         url,
+        collection,
     })
+}
+
+/// Album, playlist o pagina di un canale (non un singolo video).
+fn is_collection_url(url: &str) -> bool {
+    let u = url.to_lowercase();
+    (u.contains("list=") && !u.contains("watch?"))
+        || u.contains("/browse/")
+        || u.contains("/playlist")
 }
 
 /// Esegue la ricerca (bloccante: va chiamata da un thread a parte).
 pub fn search(
+    source: Source,
     query: &str,
     tools: &Toolset,
     cookies_browser: &str,
     cancel: &AtomicBool,
 ) -> Result<Vec<SearchResult>> {
-    let args = build_args(query, RESULTS, tools, cookies_browser);
+    let args = build_args(source, query, RESULTS, tools, cookies_browser);
     let mut child = tools::command(&tools.ytdlp)
         .args(&args)
         .stdin(Stdio::null())
@@ -215,7 +309,13 @@ mod tests {
 
     #[test]
     fn args_end_with_the_search_after_double_dash() {
-        let a = build_args("  -Male Fantasy ", 15, &toolset(), "firefox");
+        let a = build_args(
+            Source::YouTube,
+            "  -Male Fantasy ",
+            15,
+            &toolset(),
+            "firefox",
+        );
         let n = a.len();
         assert_eq!(a[n - 2], "--");
         assert_eq!(a[n - 1], "ytsearch15:-Male Fantasy");
@@ -241,12 +341,53 @@ mod tests {
 
     #[test]
     fn falls_back_to_id_and_uploader() {
-        let l = r#"{"id": "xyz", "title": "", "channel": null, "uploader": "Qualcuno", "duration": null, "view_count": null, "url": "xyz", "webpage_url": null}"#;
+        let l = r#"{"id": "dQw4w9WgXcQ", "title": "", "channel": null, "uploader": "Qualcuno", "duration": null, "view_count": null, "url": "dQw4w9WgXcQ", "webpage_url": null}"#;
         let r = parse_line(l).unwrap();
-        assert_eq!(r.url, "https://www.youtube.com/watch?v=xyz");
+        assert_eq!(r.url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         assert_eq!(r.title, r.url);
         assert_eq!(r.channel, "Qualcuno");
         assert_eq!(r.duration, None);
+    }
+
+    #[test]
+    fn music_targets() {
+        assert_eq!(
+            Source::MusicSongs.target(" Billie Eilish & Male Fantasy? ", 15),
+            "https://music.youtube.com/search?q=Billie+Eilish+%26+Male+Fantasy%3F#songs"
+        );
+        assert_eq!(
+            Source::MusicAlbums.target("perché", 15),
+            "https://music.youtube.com/search?q=perch%C3%A9#albums"
+        );
+        let a = build_args(Source::MusicSongs, "x", 15, &toolset(), "");
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--playlist-items" && w[1] == "1:15"));
+        assert_eq!(
+            a.last().unwrap(),
+            "https://music.youtube.com/search?q=x#songs"
+        );
+        let a = build_args(Source::YouTube, "x", 15, &toolset(), "");
+        assert!(!a.contains(&"--playlist-items".to_string()));
+    }
+
+    #[test]
+    fn parses_music_song_and_album() {
+        // brano: artisti come elenco, durata intera
+        let l = r#"{"id": "abcdefghijk", "title": "Male Fantasy", "artists": ["Billie Eilish"], "duration": 194, "url": "https://music.youtube.com/watch?v=abcdefghijk", "ie_key": "Youtube", "_type": "url"}"#;
+        let r = parse_line(l).unwrap();
+        assert_eq!(r.channel, "Billie Eilish");
+        assert_eq!(r.duration, Some(194.0));
+        assert!(!r.collection);
+        assert_eq!(r.url, "https://music.youtube.com/watch?v=abcdefghijk");
+        // album: si scarica tutto
+        let l = r#"{"id": "MPREb_xyz", "title": "Hit Me Hard and Soft", "url": "https://music.youtube.com/browse/MPREb_xyz", "ie_key": "YoutubeTab", "_type": "url"}"#;
+        let r = parse_line(l).unwrap();
+        assert!(r.collection);
+        assert_eq!(r.channel, "");
+        // un campo di tipo inatteso non fa perdere il risultato
+        let l = r#"{"title": "X", "artists": "non è un elenco", "duration": "?", "url": "https://music.youtube.com/watch?v=abcdefghijk"}"#;
+        assert!(parse_line(l).is_some());
     }
 
     #[test]
@@ -273,7 +414,7 @@ mod tests {
         ) else {
             return;
         };
-        let mut a = build_args("x", 1, &toolset(), "");
+        let mut a = build_args(Source::YouTube, "x", 1, &toolset(), "");
         a.retain(|x| !x.starts_with("--js-runtimes") && !x.starts_with("deno:"));
         let n = a.len();
         a[n - 1] = url;
