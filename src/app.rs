@@ -2,6 +2,7 @@
 //! Interfaccia grafica (egui).
 use crate::config::{Config, Mode};
 use crate::downloader::{self, Emit, Event, Toolset};
+use crate::search::{self, SearchResult};
 use crate::selfupdate::{self, Release};
 use crate::tools;
 use crate::tr;
@@ -65,6 +66,11 @@ enum Msg {
     UpdateDone(Result<(), String>),
     Folder(PathBuf),
     Dl(Event),
+    /// esito di una ricerca; `seq` scarta le risposte di ricerche ormai superate
+    SearchDone {
+        seq: u64,
+        result: Result<Vec<SearchResult>, String>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -92,6 +98,22 @@ enum UpdateUi {
 }
 
 #[derive(Default)]
+struct SearchUi {
+    query: String,
+    /// testo cercato per ultimo (per il messaggio «nessun risultato»)
+    last_query: String,
+    results: Vec<SearchResult>,
+    /// risultati spuntati per scaricarli insieme (stessi indici di `results`)
+    selected: Vec<bool>,
+    busy: bool,
+    error: Option<String>,
+    seq: u64,
+    cancel: Arc<AtomicBool>,
+    /// messaggio dopo «Aggiungi ai link»
+    notice: Option<String>,
+}
+
+#[derive(Default)]
 struct ToolsUi {
     ytdlp: Option<String>,
     ffmpeg: Option<PathBuf>,
@@ -114,6 +136,7 @@ pub struct App {
     cancel: Arc<AtomicBool>,
     log: Vec<String>,
     update: UpdateUi,
+    search: SearchUi,
     /// ultimo esito del controllo aggiornamenti, sempre visibile in fondo alla finestra
     update_status: String,
     update_checking: bool,
@@ -141,6 +164,7 @@ impl App {
             cancel: Arc::new(AtomicBool::new(false)),
             log: Vec::new(),
             update: UpdateUi::None,
+            search: SearchUi::default(),
             update_status: String::new(),
             update_checking: false,
             auto_install: !std::env::args().any(|a| a == selfupdate::AFTER_UPDATE_ARG),
@@ -224,7 +248,12 @@ impl App {
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
-        if inputs.is_empty() {
+        self.start_jobs(ctx, inputs);
+    }
+
+    /// Avvia il download dei link indicati, con le opzioni scelte (Video/Audio, formato…).
+    fn start_jobs(&mut self, ctx: &egui::Context, inputs: Vec<String>) {
+        if inputs.is_empty() || self.running {
             return;
         }
         if let Err(e) = std::fs::create_dir_all(&self.cfg.out_dir) {
@@ -239,15 +268,73 @@ impl App {
         self.running = true;
         self.cancel.store(false, Ordering::Relaxed);
 
-        let toolset = Toolset {
-            ytdlp: tools::ytdlp_path(),
-            ffmpeg_dir: self.tools.ffmpeg.clone(),
-            deno: self.tools.deno.clone(),
-        };
+        let toolset = self.toolset();
         let send = self.sender(ctx);
         let emit: Emit = Arc::new(move |e| send(Msg::Dl(e)));
         let (cfg, cancel, base) = (self.cfg.clone(), self.cancel.clone(), self.next_id);
         thread::spawn(move || downloader::run(inputs, cfg, toolset, base, emit, cancel));
+    }
+
+    fn toolset(&self) -> Toolset {
+        Toolset {
+            ytdlp: tools::ytdlp_path(),
+            ffmpeg_dir: self.tools.ffmpeg.clone(),
+            deno: self.tools.deno.clone(),
+        }
+    }
+
+    /// Cerca su YouTube il testo scritto nella barra di ricerca (in un thread a parte).
+    fn start_search(&mut self, ctx: &egui::Context) {
+        let query = self.search.query.trim().to_string();
+        if query.is_empty() || self.tools.ytdlp.is_none() || self.tools.busy {
+            return;
+        }
+        // un link incollato nella ricerca va dritto nei link da scaricare
+        if query.starts_with("http://") || query.starts_with("https://") {
+            self.append_links(&[query]);
+            self.search.query.clear();
+            return;
+        }
+        // una ricerca nuova annulla quella eventualmente in corso
+        self.search.cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.search.cancel = cancel.clone();
+        self.search.seq += 1;
+        self.search.busy = true;
+        self.search.error = None;
+        self.search.notice = None;
+        self.search.last_query = query.clone();
+        let seq = self.search.seq;
+        let toolset = self.toolset();
+        let cookies = self.cfg.cookies_browser.clone();
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let result =
+                search::search(&query, &toolset, &cookies, &cancel).map_err(|e| format!("{e:#}"));
+            send(Msg::SearchDone { seq, result });
+        });
+    }
+
+    fn cancel_search(&mut self) {
+        self.search.cancel.store(true, Ordering::Relaxed);
+        self.search.seq += 1; // l'eventuale risposta in arrivo verrà ignorata
+        self.search.busy = false;
+    }
+
+    /// Aggiunge dei link in fondo al campo «Link», senza doppioni.
+    fn append_links(&mut self, urls: &[String]) -> usize {
+        let mut added = 0;
+        for u in urls {
+            if self.input.lines().any(|l| l.trim() == u) {
+                continue;
+            }
+            if !self.input.is_empty() && !self.input.ends_with('\n') {
+                self.input.push('\n');
+            }
+            self.input.push_str(u);
+            added += 1;
+        }
+        added
     }
 
     fn pick_folder(&self, ctx: &egui::Context) {
@@ -334,6 +421,19 @@ impl App {
             }
             Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::SearchDone { seq, result } => {
+                if seq != self.search.seq {
+                    return; // risposta di una ricerca superata o annullata
+                }
+                self.search.busy = false;
+                match result {
+                    Ok(r) => {
+                        self.search.selected = vec![false; r.len()];
+                        self.search.results = r;
+                    }
+                    Err(e) => self.search.error = Some(e),
+                }
+            }
             Msg::Dl(ev) => match ev {
                 Event::Log(l) => {
                     self.log.push(l);
@@ -396,6 +496,8 @@ impl eframe::App for App {
                     self.update_banner(ui, ctx);
                     self.tools_banner(ui, ctx);
                     ui.add_space(4.0);
+                    self.search_card(ui, ctx);
+                    ui.add_space(8.0);
                     self.link_card(ui);
                     ui.add_space(8.0);
                     self.options_card(ui, ctx);
@@ -568,6 +670,290 @@ impl App {
             ui.label(
                 RichText::new(tr!(format!("Attenzione: {w}"), format!("Warning: {w}"))).color(WARN),
             );
+        }
+    }
+
+    /// Barra di ricerca: cerca su YouTube e permette di scaricare i risultati scelti.
+    fn search_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let field_id = ui.scope_id().with("search_field");
+        let ready = self.tools.ytdlp.is_some() && !self.tools.busy;
+        let can_download = ready && !self.running;
+        let mut do_search = false;
+        let mut do_cancel = false;
+        let mut download: Vec<String> = Vec::new();
+        let mut add: Vec<String> = Vec::new();
+        let mut clear = false;
+
+        card(ui, |ui| {
+            let title_id = ui.label(RichText::new(tr!("Cerca", "Search")).strong()).id;
+            ui.horizontal(|ui| {
+                let btn_w = if self.search.busy { 190.0 } else { 90.0 };
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.search.query)
+                        .id(field_id)
+                        .desired_width((ui.available_width() - btn_w).max(120.0))
+                        .hint_text(tr!(
+                            "Artista e titolo di un brano, oppure il nome di un video",
+                            "Artist and song title, or the name of a video"
+                        )),
+                );
+                let resp = resp.labelled_by(title_id);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    do_search = true;
+                }
+                let has_query = !self.search.query.trim().is_empty();
+                if ui
+                    .add_enabled(
+                        ready && has_query,
+                        egui::Button::new(tr!("Cerca", "Search")),
+                    )
+                    .clicked()
+                {
+                    do_search = true;
+                }
+                if self.search.busy {
+                    ui.spinner();
+                    if ui.button(tr!("Annulla", "Cancel")).clicked() {
+                        do_cancel = true;
+                    }
+                }
+            });
+            if !ready {
+                ui.label(
+                    RichText::new(tr!(
+                        "La ricerca sarà disponibile appena yt-dlp è pronto.",
+                        "Search will be available as soon as yt-dlp is ready."
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
+            if let Some(e) = &self.search.error {
+                ui.label(
+                    RichText::new(tr!(
+                        format!("Ricerca non riuscita: {e}"),
+                        format!("Search failed: {e}")
+                    ))
+                    .color(ERR),
+                );
+            }
+            if let Some(n) = &self.search.notice {
+                ui.label(RichText::new(n).small().color(OK));
+            }
+
+            let res = &self.search.results;
+            if res.is_empty() {
+                if !self.search.busy
+                    && self.search.error.is_none()
+                    && !self.search.last_query.is_empty()
+                {
+                    ui.label(
+                        RichText::new(tr!(
+                            format!("Nessun risultato per «{}».", self.search.last_query),
+                            format!("No results for “{}”.", self.search.last_query)
+                        ))
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                }
+                return;
+            }
+
+            let what = match self.cfg.mode {
+                Mode::Video => tr!("come video", "as video"),
+                Mode::Audio => tr!("come audio", "as audio"),
+            };
+            ui.label(
+                RichText::new(tr!(
+                    format!(
+                        "{} risultati per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
+                        res.len(),
+                        self.search.last_query
+                    ),
+                    format!(
+                        "{} results for “{}” · “Download” saves them {what}, with the options below.",
+                        res.len(),
+                        self.search.last_query
+                    )
+                ))
+                .small()
+                .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(2.0);
+            egui::ScrollArea::vertical()
+                .id_salt("search_results")
+                .max_height(330.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, r) in self.search.results.iter().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        ui.horizontal(|ui| {
+                            let sel = &mut self.search.selected[i];
+                            let resp = ui.add(egui::Checkbox::without_text(sel));
+                            let checked = *sel;
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::Role::CheckBox,
+                                    true,
+                                    checked,
+                                    tr!(
+                                        format!("Seleziona {}", r.title),
+                                        format!("Select {}", r.title)
+                                    ),
+                                )
+                            });
+                            let dl = ui
+                                .add_enabled(
+                                    can_download,
+                                    egui::Button::new(tr!("Scarica", "Download")).small(),
+                                )
+                                .on_hover_text(tr!(
+                                    "Scarica subito questo risultato",
+                                    "Download this result now"
+                                ));
+                            dl.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::Button,
+                                    can_download,
+                                    tr!(
+                                        format!("Scarica {}", r.title),
+                                        format!("Download {}", r.title)
+                                    ),
+                                )
+                            });
+                            if dl.clicked() {
+                                download.push(r.url.clone());
+                            }
+                            let plus = ui.small_button("+").on_hover_text(tr!(
+                                "Aggiungi ai link da scaricare",
+                                "Add to the links to download"
+                            ));
+                            plus.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::Button,
+                                    true,
+                                    tr!(
+                                        format!("Aggiungi ai link: {}", r.title),
+                                        format!("Add to links: {}", r.title)
+                                    ),
+                                )
+                            });
+                            if plus.clicked() {
+                                add.push(r.url.clone());
+                            }
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&r.title).strong()).truncate(),
+                                )
+                                .on_hover_text(&r.title);
+                                let mut meta: Vec<String> = Vec::new();
+                                if !r.channel.is_empty() {
+                                    meta.push(r.channel.clone());
+                                }
+                                if let Some(d) = r.duration {
+                                    meta.push(search::fmt_duration(d));
+                                }
+                                if let Some(v) = r.views {
+                                    meta.push(search::fmt_views(v));
+                                }
+                                ui.horizontal(|ui| {
+                                    if !meta.is_empty() {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(meta.join(" · "))
+                                                    .small()
+                                                    .color(ui.visuals().weak_text_color()),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+                                    ui.hyperlink_to(
+                                        RichText::new(tr!("apri", "open")).small(),
+                                        &r.url,
+                                    );
+                                });
+                            });
+                        });
+                    }
+                });
+
+            let n_sel = self.search.selected.iter().filter(|s| **s).count();
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let picked = || {
+                    self.search
+                        .results
+                        .iter()
+                        .zip(&self.search.selected)
+                        .filter(|(_, s)| **s)
+                        .map(|(r, _)| r.url.clone())
+                        .collect::<Vec<_>>()
+                };
+                if ui
+                    .add_enabled(
+                        can_download && n_sel > 0,
+                        egui::Button::new(tr!(
+                            format!("Scarica selezionati ({n_sel})"),
+                            format!("Download selected ({n_sel})")
+                        )),
+                    )
+                    .clicked()
+                {
+                    download = picked();
+                }
+                if ui
+                    .add_enabled(
+                        n_sel > 0,
+                        egui::Button::new(tr!(
+                            "Aggiungi selezionati ai link",
+                            "Add selected to links"
+                        )),
+                    )
+                    .clicked()
+                {
+                    add = picked();
+                }
+                if ui
+                    .button(tr!("Pulisci risultati", "Clear results"))
+                    .clicked()
+                {
+                    clear = true;
+                }
+            });
+        });
+
+        if do_cancel {
+            self.cancel_search();
+        } else if do_search {
+            self.start_search(ctx);
+        }
+        if !add.is_empty() {
+            let n = self.append_links(&add);
+            self.search.notice = Some(match n {
+                0 => tr!("Già presente nei link.", "Already in the links.").into(),
+                1 => tr!(
+                    "Aggiunto ai link: premi «Scarica» quando vuoi.",
+                    "Added to the links: press “Download” when you like."
+                )
+                .into(),
+                n => tr!(
+                    format!("{n} link aggiunti: premi «Scarica» quando vuoi."),
+                    format!("{n} links added: press “Download” when you like.")
+                ),
+            });
+        }
+        if !download.is_empty() {
+            self.search.notice = None;
+            self.start_jobs(ctx, download);
+        }
+        if clear {
+            self.cancel_search();
+            self.search.results.clear();
+            self.search.selected.clear();
+            self.search.last_query.clear();
+            self.search.error = None;
+            self.search.notice = None;
         }
     }
 

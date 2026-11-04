@@ -403,7 +403,7 @@ fn pump(r: impl Read + Send + 'static, tx: Sender<(bool, String)>, is_err: bool)
 }
 
 /// yt-dlp (PyInstaller) lancia un processo figlio: va terminato l'intero albero.
-fn terminate(child: &mut Child) {
+pub(crate) fn terminate(child: &mut Child) {
     #[cfg(windows)]
     {
         let _ = tools::command("taskkill")

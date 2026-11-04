@@ -12,6 +12,9 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
 - **Video**: MP4 / MKV / WebM, qualità massima a scelta (fino a 4K).
 - **Audio**: MP3, M4A (AAC), Opus, OGG Vorbis, FLAC, WAV, con scelta del **bitrate**.
 - Cartella di destinazione a scelta, più link in un colpo solo (uno per riga).
+- **Ricerca**: scrivi artista e titolo (o il nome di un video) nella barra *Cerca*, scegli tra i
+  risultati di YouTube e premi *Scarica* (subito) o *+* (aggiungi ai link). Si possono
+  spuntare più risultati e scaricarli insieme, nel formato scelto (Video o Audio).
 - **Playlist**: i file vanno in una cartella con il nome della playlist e si chiamano
   `1 - Titolo.mp4`, `2 - Titolo.mp4`… (senza il nome della playlist nel nome del file).
 - Copertina e metadati incorporati nei file.

@@ -12,6 +12,9 @@ The interface is in Italian if your system language is Italian, and in English o
 - **Video**: MP4 / MKV / WebM, maximum quality of your choice (up to 4K).
 - **Audio**: MP3, M4A (AAC), Opus, OGG Vorbis, FLAC, WAV, with a **bitrate** choice.
 - Choose the destination folder; paste several links at once (one per line).
+- **Search**: type an artist and title (or a video name) in the *Search* bar, pick from the
+  YouTube results and press *Download* (right away) or *+* (add to the links). You can tick
+  several results and download them together, in the chosen format (Video or Audio).
 - **Playlists**: files go into a folder named after the playlist and are called
   `1 - Title.mp4`, `2 - Title.mp4`… (the playlist name is not part of the file name).
 - Cover art and metadata embedded in the files.
