@@ -16,7 +16,8 @@ eframe = { version = "0.37", default-features = false, features = [
     "glow", "default_fonts", "clipboard", "wayland", "x11", "accesskit",
 ] }
 rfd = "0.17"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# png per l'icona; jpeg e webp per le copertine nei risultati della ricerca
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
 # rete, dati, errori
 ureq = { version = "3", features = ["json"] }

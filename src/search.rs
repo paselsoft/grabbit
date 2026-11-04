@@ -89,6 +89,8 @@ pub struct SearchResult {
     pub url: String,
     /// album o playlist: si scarica tutto, in una cartella con il suo nome
     pub collection: bool,
+    /// indirizzo della copertina (miniatura del video o copertina dell'album)
+    pub thumbnail: Option<String>,
 }
 
 pub fn build_args(
@@ -106,7 +108,7 @@ pub fn build_args(
         "--color",
         "never",
         "--print",
-        "%(.{id,title,channel,uploader,artist,artists,creator,duration,view_count,url,webpage_url,ie_key,_type})j",
+        "%(.{id,title,channel,uploader,artist,artists,creator,duration,view_count,url,webpage_url,ie_key,_type,thumbnail,thumbnails})j",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -168,6 +170,7 @@ pub fn parse_line(line: &str) -> Option<SearchResult> {
     let collection = text("_type").is_some_and(|t| t == "playlist")
         || text("ie_key").is_some_and(|k| k.contains("Tab") || k.contains("Playlist"))
         || is_collection_url(&url);
+    let thumbnail = pick_thumbnail(&v, &url);
     Some(SearchResult {
         title,
         channel,
@@ -180,7 +183,62 @@ pub fn parse_line(line: &str) -> Option<SearchResult> {
             .and_then(|n| n.as_u64().or_else(|| n.as_f64().map(|f| f as u64))),
         url,
         collection,
+        thumbnail,
     })
+}
+
+/// Larghezza ideale della copertina da scaricare (in pixel): basta per la lista dei
+/// risultati anche su schermi Retina, senza scaricare immagini enormi.
+const THUMB_WANTED: i64 = 240;
+
+/// Sceglie la copertina più adatta: la più piccola larga almeno `THUMB_WANTED`, altrimenti la
+/// più grande disponibile; per i video YouTube senza elenco usa la miniatura standard.
+fn pick_thumbnail(v: &Value, url: &str) -> Option<String> {
+    let ok = |u: &str| u.starts_with("https://") || u.starts_with("http://");
+    if let Some(list) = v.get("thumbnails").and_then(Value::as_array) {
+        let mut sized: Vec<(i64, String)> = list
+            .iter()
+            .filter_map(|t| {
+                let u = t.get("url")?.as_str()?.to_string();
+                ok(&u).then(|| (t.get("width").and_then(Value::as_i64).unwrap_or(0), u))
+            })
+            .collect();
+        sized.sort_by_key(|(w, _)| *w);
+        if let Some((_, u)) = sized
+            .iter()
+            .find(|(w, _)| *w >= THUMB_WANTED)
+            .or(sized.last())
+        {
+            return Some(u.clone());
+        }
+    }
+    if let Some(u) = v.get("thumbnail").and_then(Value::as_str).filter(|u| ok(u)) {
+        return Some(u.to_string());
+    }
+    video_id(url).map(|id| format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"))
+}
+
+/// Id del video in un link `…watch?v=ID…` (YouTube o YouTube Music).
+fn video_id(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("v=")?;
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (id.len() == 11).then_some(id)
+}
+
+/// Scarica e rimpicciolisce una copertina, pronta per diventare una texture.
+/// Restituisce larghezza, altezza e pixel RGBA.
+pub fn fetch_thumbnail(url: &str, max_w: u32, max_h: u32) -> Result<(u32, u32, Vec<u8>)> {
+    let bytes = crate::net::get_bytes(url, 4 * 1024 * 1024)?;
+    decode_thumbnail(&bytes, max_w, max_h)
+}
+
+fn decode_thumbnail(bytes: &[u8], max_w: u32, max_h: u32) -> Result<(u32, u32, Vec<u8>)> {
+    let img = image::load_from_memory(bytes)?;
+    let img = img.thumbnail(max_w, max_h).to_rgba8();
+    Ok((img.width(), img.height(), img.into_raw()))
 }
 
 /// Album, playlist o pagina di un canale (non un singolo video).
@@ -388,6 +446,58 @@ mod tests {
         // un campo di tipo inatteso non fa perdere il risultato
         let l = r#"{"title": "X", "artists": "non è un elenco", "duration": "?", "url": "https://music.youtube.com/watch?v=abcdefghijk"}"#;
         assert!(parse_line(l).is_some());
+    }
+
+    #[test]
+    fn picks_a_reasonable_thumbnail() {
+        let l = r#"{"id": "abcdefghijk", "title": "X", "url": "https://www.youtube.com/watch?v=abcdefghijk", "thumbnails": [
+            {"url": "https://i.ytimg.com/vi/abcdefghijk/hq720.jpg", "width": 720, "height": 404},
+            {"url": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg", "width": 360, "height": 202},
+            {"url": "https://i.ytimg.com/vi/abcdefghijk/default.jpg", "width": 120, "height": 90}]}"#;
+        assert_eq!(
+            parse_line(l).unwrap().thumbnail.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg")
+        );
+        // tutte piccole: la più grande
+        let l = r#"{"title": "Album", "url": "https://music.youtube.com/browse/MPREb_x", "thumbnails": [
+            {"url": "https://lh3.googleusercontent.com/a=w60-h60", "width": 60},
+            {"url": "https://lh3.googleusercontent.com/a=w120-h120", "width": 120}]}"#;
+        assert_eq!(
+            parse_line(l).unwrap().thumbnail.as_deref(),
+            Some("https://lh3.googleusercontent.com/a=w120-h120")
+        );
+        // nessuna copertina nei dati: miniatura standard ricavata dall'id del video
+        let l = r#"{"title": "Brano", "url": "https://music.youtube.com/watch?v=abcdefghijk&list=RDAMVM"}"#;
+        assert_eq!(
+            parse_line(l).unwrap().thumbnail.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg")
+        );
+        // album senza copertina: niente
+        let l = r#"{"title": "Album", "url": "https://music.youtube.com/browse/MPREb_x"}"#;
+        assert_eq!(parse_line(l).unwrap().thumbnail, None);
+    }
+
+    #[test]
+    fn decodes_and_shrinks_jpeg_covers() {
+        let mut jpg = Vec::new();
+        image::RgbImage::from_pixel(640, 360, image::Rgb([200, 80, 20]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        // 16:9 nel riquadro 16:9 (Retina: 224x126)
+        let (w, h, px) = decode_thumbnail(&jpg, 224, 126).unwrap();
+        assert_eq!((w, h), (224, 126));
+        assert_eq!(px.len(), (w * h * 4) as usize);
+        // copertina quadrata: resta quadrata
+        let mut sq = Vec::new();
+        image::RgbImage::from_pixel(544, 544, image::Rgb([1, 2, 3]))
+            .write_to(&mut std::io::Cursor::new(&mut sq), image::ImageFormat::Jpeg)
+            .unwrap();
+        let (w, h, _) = decode_thumbnail(&sq, 224, 126).unwrap();
+        assert_eq!((w, h), (126, 126));
+        assert!(decode_thumbnail(b"non sono un'immagine", 10, 10).is_err());
     }
 
     #[test]

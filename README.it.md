@@ -15,6 +15,7 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
 - **Ricerca**: scrivi artista e titolo (o il nome di un video) nella barra *Cerca*, scegli tra i
   risultati di YouTube e premi *Scarica* (subito) o *+* (aggiungi ai link). Si possono
   spuntare più risultati e scaricarli insieme, nel formato scelto (Video o Audio).
+  Ogni risultato mostra la copertina (un clic sopra lo seleziona).
   Si può cercare su **YouTube** o su **YouTube Music** (brani, album o video): un album si
   scarica tutto, in una cartella con il suo nome. Per usare il proprio account Google,
   scegli il browser in cui hai fatto l'accesso in *Opzioni avanzate → Usa i cookie del browser*.

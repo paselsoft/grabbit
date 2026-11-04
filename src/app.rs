@@ -71,6 +71,12 @@ enum Msg {
         seq: u64,
         result: Result<Vec<SearchResult>, String>,
     },
+    /// copertina del risultato `idx` della ricerca `seq`, già rimpicciolita
+    Thumb {
+        seq: u64,
+        idx: usize,
+        image: egui::ColorImage,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -106,6 +112,8 @@ struct SearchUi {
     results: Vec<SearchResult>,
     /// risultati spuntati per scaricarli insieme (stessi indici di `results`)
     selected: Vec<bool>,
+    /// copertine già scaricate (stessi indici di `results`)
+    thumbs: Vec<Option<egui::TextureHandle>>,
     busy: bool,
     error: Option<String>,
     seq: u64,
@@ -318,6 +326,40 @@ impl App {
         });
     }
 
+    /// Scarica le copertine dei risultati, qualcuna alla volta, in thread a parte.
+    /// Una copertina che non arriva lascia semplicemente il riquadro grigio.
+    fn start_thumbnails(&self, ctx: &egui::Context, seq: u64, results: &[SearchResult]) {
+        let work: Vec<(usize, String)> = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.thumbnail.clone().map(|u| (i, u)))
+            .collect();
+        let work = Arc::new(std::sync::Mutex::new(work.into_iter()));
+        // pixel reali (comprende lo zoom): su uno schermo Retina il riquadro vale il doppio
+        let scale = ctx.pixels_per_point().max(1.0);
+        let (w, h) = (
+            (THUMB_SLOT.x * scale).round() as u32,
+            (THUMB_SLOT.y * scale).round() as u32,
+        );
+        for _ in 0..4 {
+            let work = work.clone();
+            let cancel = self.search.cancel.clone();
+            let send = self.sender(ctx);
+            thread::spawn(move || loop {
+                let next = work.lock().ok().and_then(|mut it| it.next());
+                let Some((idx, url)) = next else { break };
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok((iw, ih, rgba)) = search::fetch_thumbnail(&url, w, h) {
+                    let image =
+                        egui::ColorImage::from_rgba_unmultiplied([iw as usize, ih as usize], &rgba);
+                    send(Msg::Thumb { seq, idx, image });
+                }
+            });
+        }
+    }
+
     fn cancel_search(&mut self) {
         self.search.cancel.store(true, Ordering::Relaxed);
         self.search.seq += 1; // l'eventuale risposta in arrivo verrà ignorata
@@ -424,6 +466,17 @@ impl App {
             }
             Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Thumb { seq, idx, image } => {
+                if seq == self.search.seq {
+                    if let Some(slot) = self.search.thumbs.get_mut(idx) {
+                        *slot = Some(ctx.load_texture(
+                            format!("thumb-{seq}-{idx}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+            }
             Msg::SearchDone { seq, result } => {
                 if seq != self.search.seq {
                     return; // risposta di una ricerca superata o annullata
@@ -432,6 +485,8 @@ impl App {
                 match result {
                     Ok(r) => {
                         self.search.selected = vec![false; r.len()];
+                        self.search.thumbs = vec![None; r.len()];
+                        self.start_thumbnails(ctx, seq, &r);
                         self.search.results = r;
                     }
                     Err(e) => self.search.error = Some(e),
@@ -843,49 +898,42 @@ impl App {
                                     ),
                                 )
                             });
-                            let dl = ui
-                                .add_enabled(
-                                    can_download,
-                                    egui::Button::new(tr!("Scarica", "Download")).small(),
-                                )
-                                .on_hover_text(if r.collection {
-                                    tr!(
-                                        "Scarica subito tutto l'album o la playlist, in una cartella con il suo nome",
-                                        "Download the whole album or playlist now, in a folder with its name"
-                                    )
-                                } else {
-                                    tr!("Scarica subito questo risultato", "Download this result now")
-                                });
-                            dl.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::Role::Button,
-                                    can_download,
-                                    tr!(
-                                        format!("Scarica {}", r.title),
-                                        format!("Download {}", r.title)
-                                    ),
-                                )
-                            });
-                            if dl.clicked() {
-                                download.push(r.url.clone());
+
+                            // copertina: un clic sopra spunta (o toglie la spunta a) il risultato
+                            let (rect, cover) =
+                                ui.allocate_exact_size(THUMB_SLOT, egui::Sense::click());
+                            match self.search.thumbs.get(i).and_then(|t| t.as_ref()) {
+                                Some(tex) => {
+                                    egui::Image::new((tex.id(), fit(tex.size_vec2(), THUMB_SLOT)))
+                                        .corner_radius(6)
+                                        .paint_at(
+                                            ui,
+                                            egui::Rect::from_center_size(
+                                                rect.center(),
+                                                fit(tex.size_vec2(), THUMB_SLOT),
+                                            ),
+                                        );
+                                }
+                                None => {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        6,
+                                        Color32::from_rgb(36, 36, 40),
+                                    );
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        if r.collection { "♫" } else { "▶" },
+                                        egui::FontId::proportional(20.0),
+                                        Color32::from_rgb(90, 90, 98),
+                                    );
+                                }
                             }
-                            let plus = ui.small_button("+").on_hover_text(tr!(
-                                "Aggiungi ai link da scaricare",
-                                "Add to the links to download"
-                            ));
-                            plus.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::Role::Button,
-                                    true,
-                                    tr!(
-                                        format!("Aggiungi ai link: {}", r.title),
-                                        format!("Add to links: {}", r.title)
-                                    ),
-                                )
-                            });
-                            if plus.clicked() {
-                                add.push(r.url.clone());
+                            let cover = cover.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            if cover.clicked() {
+                                self.search.selected[i] = !checked;
                             }
+
                             ui.vertical(|ui| {
                                 ui.add(
                                     egui::Label::new(RichText::new(&r.title).strong()).truncate(),
@@ -904,16 +952,59 @@ impl App {
                                 if let Some(v) = r.views {
                                     meta.push(search::fmt_views(v));
                                 }
+                                if !meta.is_empty() {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(meta.join(" · "))
+                                                .small()
+                                                .color(ui.visuals().weak_text_color()),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
                                 ui.horizontal(|ui| {
-                                    if !meta.is_empty() {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(meta.join(" · "))
-                                                    .small()
-                                                    .color(ui.visuals().weak_text_color()),
+                                    let dl = ui
+                                        .add_enabled(
+                                            can_download,
+                                            egui::Button::new(tr!("Scarica", "Download")).small(),
+                                        )
+                                        .on_hover_text(if r.collection {
+                                            tr!(
+                                                "Scarica subito tutto l'album o la playlist, in una cartella con il suo nome",
+                                                "Download the whole album or playlist now, in a folder with its name"
                                             )
-                                            .truncate(),
-                                        );
+                                        } else {
+                                            tr!("Scarica subito questo risultato", "Download this result now")
+                                        });
+                                    dl.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            can_download,
+                                            tr!(
+                                                format!("Scarica {}", r.title),
+                                                format!("Download {}", r.title)
+                                            ),
+                                        )
+                                    });
+                                    if dl.clicked() {
+                                        download.push(r.url.clone());
+                                    }
+                                    let plus = ui.small_button("+").on_hover_text(tr!(
+                                        "Aggiungi ai link da scaricare",
+                                        "Add to the links to download"
+                                    ));
+                                    plus.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            tr!(
+                                                format!("Aggiungi ai link: {}", r.title),
+                                                format!("Add to links: {}", r.title)
+                                            ),
+                                        )
+                                    });
+                                    if plus.clicked() {
+                                        add.push(r.url.clone());
                                     }
                                     ui.hyperlink_to(
                                         RichText::new(tr!("apri", "open")).small(),
@@ -998,6 +1089,7 @@ impl App {
             self.cancel_search();
             self.search.results.clear();
             self.search.selected.clear();
+            self.search.thumbs.clear();
             self.search.last_query.clear();
             self.search.error = None;
             self.search.notice = None;
@@ -1386,6 +1478,18 @@ impl App {
 }
 
 // ───────────────────────────── utilità ─────────────────────────────
+
+/// Riquadro della copertina nei risultati della ricerca (16:9, come le miniature YouTube).
+const THUMB_SLOT: egui::Vec2 = egui::vec2(112.0, 63.0);
+
+/// Dimensione di `size` rimpicciolita per stare dentro `slot` senza deformarsi.
+fn fit(size: egui::Vec2, slot: egui::Vec2) -> egui::Vec2 {
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return slot;
+    }
+    let k = (slot.x / size.x).min(slot.y / size.y);
+    size * k
+}
 
 fn label_of(list: &[(&str, &'static str)], key: &str) -> &'static str {
     list.iter()

@@ -46,6 +46,17 @@ pub fn get_text(url: &str) -> Result<String> {
     Ok(resp.body_mut().read_to_string()?)
 }
 
+/// Scarica in memoria un file piccolo (al massimo `limit` byte), ad esempio un'immagine.
+pub fn get_bytes(url: &str, limit: u64) -> Result<Vec<u8>> {
+    let mut resp = agent().get(url).call().with_context(|| {
+        tr!(
+            format!("richiesta a {url} fallita"),
+            format!("request to {url} failed")
+        )
+    })?;
+    Ok(resp.body_mut().with_config().limit(limit).read_to_vec()?)
+}
+
 /// Scarica `url` in `dest` (passando da un file `.part`), chiamando
 /// `progress(scaricati, totali)` mentre procede.
 pub fn download(url: &str, dest: &Path, progress: &mut dyn FnMut(u64, Option<u64>)) -> Result<()> {
