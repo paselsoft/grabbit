@@ -106,6 +106,9 @@ jobs:
         with:
           name: windows
           path: grabbit-windows-x86_64.exe
+          # account gratuito: 500 MB in tutto per i file delle Actions, quindi
+          # i file si cancellano da soli dopo pochi giorni (le release restano)
+          retention-days: 5
 
   linux:
     needs: prepare
@@ -124,6 +127,9 @@ jobs:
         with:
           name: linux-x86_64
           path: target/appimage/grabbit-linux-x86_64.AppImage
+          # account gratuito: 500 MB in tutto per i file delle Actions, quindi
+          # i file si cancellano da soli dopo pochi giorni (le release restano)
+          retention-days: 5
 
   # Linux ARM (es. Raspberry Pi): facoltativo. I runner ARM gratuiti esistono solo
   # per repository pubblici; se manca o fallisce, la release esce comunque.
@@ -144,6 +150,9 @@ jobs:
         with:
           name: linux-aarch64
           path: target/appimage/grabbit-linux-aarch64.AppImage
+          # account gratuito: 500 MB in tutto per i file delle Actions, quindi
+          # i file si cancellano da soli dopo pochi giorni (le release restano)
+          retention-days: 5
 
   macos:
     needs: prepare
@@ -197,6 +206,9 @@ jobs:
         with:
           name: macos
           path: dist/*
+          # account gratuito: 500 MB in tutto per i file delle Actions, quindi
+          # i file si cancellano da soli dopo pochi giorni (le release restano)
+          retention-days: 5
 
   # ───────────── 3. pubblicazione ─────────────
   publish:
