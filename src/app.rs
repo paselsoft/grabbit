@@ -71,6 +71,12 @@ enum Msg {
         seq: u64,
         result: Result<Vec<SearchResult>, String>,
     },
+    /// titolo, artista, brani e copertina di un album arrivato senza (risultato `idx`)
+    Details {
+        seq: u64,
+        idx: usize,
+        details: Option<search::Details>,
+    },
     /// copertina del risultato `idx` della ricerca `seq`, già rimpicciolita
     Thumb {
         seq: u64,
@@ -326,14 +332,18 @@ impl App {
         });
     }
 
-    /// Scarica le copertine dei risultati, qualcuna alla volta, in thread a parte.
+    /// Completa i risultati in thread a parte, quattro alla volta: per gli album arrivati
+    /// senza titolo chiede a yt-dlp i loro dati, poi scarica le copertine.
     /// Una copertina che non arriva lascia semplicemente il riquadro grigio.
     fn start_thumbnails(&self, ctx: &egui::Context, seq: u64, results: &[SearchResult]) {
-        let work: Vec<(usize, String)> = results
+        // gli album da completare per primi: sono quelli senza titolo
+        let mut work: Vec<(usize, bool, String, Option<String>)> = results
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| r.thumbnail.clone().map(|u| (i, u)))
+            .filter(|(_, r)| r.needs_details || r.thumbnail.is_some())
+            .map(|(i, r)| (i, r.needs_details, r.url.clone(), r.thumbnail.clone()))
             .collect();
+        work.sort_by_key(|w| !w.1);
         let work = Arc::new(std::sync::Mutex::new(work.into_iter()));
         // pixel reali (comprende lo zoom): su uno schermo Retina il riquadro vale il doppio
         let scale = ctx.pixels_per_point().max(1.0);
@@ -341,17 +351,30 @@ impl App {
             (THUMB_SLOT.x * scale).round() as u32,
             (THUMB_SLOT.y * scale).round() as u32,
         );
+        let toolset = self.toolset();
+        let cookies = self.cfg.cookies_browser.clone();
         for _ in 0..4 {
             let work = work.clone();
             let cancel = self.search.cancel.clone();
             let send = self.sender(ctx);
+            let (toolset, cookies) = (toolset.clone(), cookies.clone());
             thread::spawn(move || loop {
                 let next = work.lock().ok().and_then(|mut it| it.next());
-                let Some((idx, url)) = next else { break };
+                let Some((idx, needs_details, url, mut thumb)) = next else {
+                    break;
+                };
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Ok((iw, ih, rgba)) = search::fetch_thumbnail(&url, w, h) {
+                if needs_details {
+                    let details = search::fetch_details(&url, &toolset, &cookies, &cancel).ok();
+                    if thumb.is_none() {
+                        thumb = details.as_ref().and_then(|d| d.thumbnail.clone());
+                    }
+                    send(Msg::Details { seq, idx, details });
+                }
+                let Some(thumb) = thumb else { continue };
+                if let Ok((iw, ih, rgba)) = search::fetch_thumbnail(&thumb, w, h) {
                     let image =
                         egui::ColorImage::from_rgba_unmultiplied([iw as usize, ih as usize], &rgba);
                     send(Msg::Thumb { seq, idx, image });
@@ -466,6 +489,23 @@ impl App {
             }
             Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Details { seq, idx, details } => {
+                if seq == self.search.seq {
+                    if let Some(r) = self.search.results.get_mut(idx) {
+                        r.needs_details = false;
+                        if let Some(d) = details {
+                            if let Some(t) = d.title {
+                                r.title = t;
+                            }
+                            if let Some(a) = d.artist {
+                                r.channel = a;
+                            }
+                            r.tracks = d.tracks.or(r.tracks);
+                            r.thumbnail = r.thumbnail.take().or(d.thumbnail);
+                        }
+                    }
+                }
+            }
             Msg::Thumb { seq, idx, image } => {
                 if seq == self.search.seq {
                     if let Some(slot) = self.search.thumbs.get_mut(idx) {
@@ -935,16 +975,41 @@ impl App {
                             }
 
                             ui.vertical(|ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(&r.title).strong()).truncate(),
-                                )
-                                .on_hover_text(&r.title);
+                                if r.needs_details {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            RichText::new(tr!(
+                                                "Album: carico titolo e copertina…",
+                                                "Album: loading title and cover…"
+                                            ))
+                                            .color(ui.visuals().weak_text_color()),
+                                        );
+                                    });
+                                } else {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&r.title).strong())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(&r.title);
+                                }
                                 let mut meta: Vec<String> = Vec::new();
                                 if r.collection {
-                                    meta.push(tr!("Album / playlist", "Album / playlist").into());
+                                    // gli album di YouTube Music hanno indirizzi …/browse/MPREb_…
+                                    meta.push(
+                                        if r.url.contains("/browse/MPREb") {
+                                            "Album"
+                                        } else {
+                                            "Playlist"
+                                        }
+                                        .into(),
+                                    );
                                 }
                                 if !r.channel.is_empty() {
                                     meta.push(r.channel.clone());
+                                }
+                                if let Some(n) = r.tracks {
+                                    meta.push(tr!(format!("{n} brani"), format!("{n} tracks")));
                                 }
                                 if let Some(d) = r.duration {
                                     meta.push(search::fmt_duration(d));

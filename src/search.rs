@@ -91,6 +91,11 @@ pub struct SearchResult {
     pub collection: bool,
     /// indirizzo della copertina (miniatura del video o copertina dell'album)
     pub thumbnail: Option<String>,
+    /// numero di brani (album e playlist, quando lo si conosce)
+    pub tracks: Option<u64>,
+    /// album di YouTube Music arrivato senza titolo o copertina: i dati vanno chiesti
+    /// a parte con `fetch_details`
+    pub needs_details: bool,
 }
 
 pub fn build_args(
@@ -150,6 +155,7 @@ pub fn parse_line(line: &str) -> Option<SearchResult> {
             .filter(|id| id.len() == 11) // id di un video YouTube
             .map(|id| format!("https://www.youtube.com/watch?v={id}"))
     })?;
+    let has_title = text("title").is_some();
     let title = text("title").unwrap_or_else(|| url.clone());
     let artists = v
         .get("artists")
@@ -183,7 +189,9 @@ pub fn parse_line(line: &str) -> Option<SearchResult> {
             .and_then(|n| n.as_u64().or_else(|| n.as_f64().map(|f| f as u64))),
         url,
         collection,
+        needs_details: collection && (!has_title || thumbnail.is_none()),
         thumbnail,
+        tracks: None,
     })
 }
 
@@ -258,8 +266,33 @@ pub fn search(
     cancel: &AtomicBool,
 ) -> Result<Vec<SearchResult>> {
     let args = build_args(source, query, RESULTS, tools, cookies_browser);
+    let (out, err) = run_ytdlp(tools, &args, cancel, TIMEOUT)?;
+    let results: Vec<SearchResult> = out.lines().filter_map(parse_line).collect();
+    if results.is_empty() {
+        if let Some(e) = last_error(&err) {
+            bail!(e);
+        }
+    }
+    Ok(results)
+}
+
+fn last_error(stderr: &str) -> Option<String> {
+    stderr
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("ERROR"))
+        .map(|l| l.trim_start_matches("ERROR:").trim().to_string())
+}
+
+/// Esegue yt-dlp e ne restituisce stdout e stderr, con annullamento e tempo massimo.
+fn run_ytdlp(
+    tools: &Toolset,
+    args: &[String],
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<(String, String)> {
     let mut child = tools::command(&tools.ytdlp)
-        .args(&args)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -297,7 +330,7 @@ pub fn search(
             let _ = child.wait();
             bail!(tr!("Ricerca annullata", "Search cancelled"));
         }
-        if started.elapsed() > TIMEOUT {
+        if started.elapsed() > timeout {
             terminate(&mut child);
             let _ = child.wait();
             bail!(tr!(
@@ -307,20 +340,110 @@ pub fn search(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let out = out_t.join().unwrap_or_default();
-    let err = err_t.join().unwrap_or_default();
-    let results: Vec<SearchResult> = out.lines().filter_map(parse_line).collect();
-    if results.is_empty() {
-        if let Some(e) = err
-            .lines()
-            .rev()
-            .find(|l| l.starts_with("ERROR"))
-            .map(|l| l.trim_start_matches("ERROR:").trim().to_string())
-        {
-            bail!(e);
-        }
+    Ok((
+        out_t.join().unwrap_or_default(),
+        err_t.join().unwrap_or_default(),
+    ))
+}
+
+/// Dati di un album (o playlist) letti dalla sua pagina.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Details {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub tracks: Option<u64>,
+    pub thumbnail: Option<String>,
+}
+
+pub fn details_args(url: &str, tools: &Toolset, cookies_browser: &str) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "--flat-playlist",
+        "--skip-download",
+        "--no-warnings",
+        "--ignore-errors",
+        "--color",
+        "never",
+        // basta il primo brano: i dati dell'album arrivano con lui (campi playlist_*)
+        "--playlist-items",
+        "1",
+        "--print",
+        "%(.{playlist_title,playlist_uploader,playlist_channel,playlist_count,n_entries,id,url,thumbnails,artists,artist,channel,uploader})j",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(d) = &tools.deno {
+        a.push("--js-runtimes".into());
+        a.push(format!("deno:{}", d.to_string_lossy()));
     }
-    Ok(results)
+    if !cookies_browser.is_empty() {
+        a.push("--cookies-from-browser".into());
+        a.push(cookies_browser.into());
+    }
+    a.push("--".into());
+    a.push(url.into());
+    a
+}
+
+/// Toglie le aggiunte di YouTube ai nomi: «Album - X» → «X», «Artista - Topic» → «Artista».
+fn clean_name(s: &str) -> String {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("Album - ")
+        .or_else(|| s.strip_prefix("Single - "))
+        .or_else(|| s.strip_prefix("EP - "))
+        .unwrap_or(s);
+    s.strip_suffix(" - Topic").unwrap_or(s).trim().to_string()
+}
+
+pub fn parse_details(line: &str) -> Option<Details> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(clean_name)
+            .filter(|s| !s.is_empty() && s != "NA")
+    };
+    let artists = v
+        .get("artists")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_str)
+        .map(clean_name);
+    let count = |k: &str| v.get(k).and_then(Value::as_u64).filter(|n| *n > 0);
+    // copertina: quella del primo brano (per un album è la copertina dell'album)
+    let first_url = text("url").unwrap_or_default();
+    let thumbnail = pick_thumbnail(&v, &first_url).or_else(|| {
+        text("id")
+            .filter(|id| id.len() == 11)
+            .map(|id| format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"))
+    });
+    Some(Details {
+        title: text("playlist_title"),
+        artist: text("playlist_uploader")
+            .or_else(|| text("playlist_channel"))
+            .or(artists)
+            .or_else(|| text("artist"))
+            .or_else(|| text("channel"))
+            .or_else(|| text("uploader")),
+        tracks: count("playlist_count").or_else(|| count("n_entries")),
+        thumbnail,
+    })
+}
+
+/// Chiede a yt-dlp titolo, artista, numero di brani e copertina di un album.
+pub fn fetch_details(
+    url: &str,
+    tools: &Toolset,
+    cookies_browser: &str,
+    cancel: &AtomicBool,
+) -> Result<Details> {
+    let args = details_args(url, tools, cookies_browser);
+    let (out, err) = run_ytdlp(tools, &args, cancel, Duration::from_secs(45))?;
+    match out.lines().find_map(parse_details) {
+        Some(d) => Ok(d),
+        None => bail!(last_error(&err).unwrap_or_else(|| "nessun dato".into())),
+    }
 }
 
 pub fn fmt_duration(secs: f64) -> String {
@@ -498,6 +621,47 @@ mod tests {
         let (w, h, _) = decode_thumbnail(&sq, 224, 126).unwrap();
         assert_eq!((w, h), (126, 126));
         assert!(decode_thumbnail(b"non sono un'immagine", 10, 10).is_err());
+    }
+
+    #[test]
+    fn album_without_title_needs_details() {
+        let l = r#"{"id": "MPREb_JpXW8CzJwCB", "url": "https://music.youtube.com/browse/MPREb_JpXW8CzJwCB", "ie_key": "YoutubeTab", "_type": "url"}"#;
+        let r = parse_line(l).unwrap();
+        assert!(r.collection && r.needs_details);
+        // un brano non ne ha bisogno
+        let l =
+            r#"{"title": "Male Fantasy", "url": "https://music.youtube.com/watch?v=abcdefghijk"}"#;
+        assert!(!parse_line(l).unwrap().needs_details);
+    }
+
+    #[test]
+    fn parses_album_details() {
+        let l = r#"{"playlist_title": "Album - Vivere a colori", "playlist_uploader": "Alessandra Amoroso", "playlist_count": 12, "id": "abcdefghijk", "url": "https://music.youtube.com/watch?v=abcdefghijk", "thumbnails": [{"url": "https://lh3.googleusercontent.com/x=w544-h544", "width": 544}], "channel": "Alessandra Amoroso - Topic"}"#;
+        let d = parse_details(l).unwrap();
+        assert_eq!(d.title.as_deref(), Some("Vivere a colori"));
+        assert_eq!(d.artist.as_deref(), Some("Alessandra Amoroso"));
+        assert_eq!(d.tracks, Some(12));
+        assert_eq!(
+            d.thumbnail.as_deref(),
+            Some("https://lh3.googleusercontent.com/x=w544-h544")
+        );
+        // dati minimi: artista dal canale «- Topic», copertina dall'id del primo brano
+        let l = r#"{"playlist_title": "Senza Nuvole", "id": "abcdefghijk", "channel": "Alessandra Amoroso - Topic", "n_entries": 10}"#;
+        let d = parse_details(l).unwrap();
+        assert_eq!(d.artist.as_deref(), Some("Alessandra Amoroso"));
+        assert_eq!(d.tracks, Some(10));
+        assert_eq!(
+            d.thumbnail.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg")
+        );
+        let a = details_args("https://music.youtube.com/browse/MPREb_x", &toolset(), "");
+        assert_eq!(
+            a.last().unwrap(),
+            "https://music.youtube.com/browse/MPREb_x"
+        );
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--playlist-items" && w[1] == "1"));
     }
 
     #[test]
