@@ -69,7 +69,7 @@ enum Msg {
     /// esito di una ricerca; `seq` scarta le risposte di ricerche ormai superate
     SearchDone {
         seq: u64,
-        result: Result<Vec<SearchResult>, String>,
+        result: Result<search::Outcome, String>,
     },
     /// titolo, artista, brani e copertina di un album arrivato senza (risultato `idx`)
     Details {
@@ -115,6 +115,8 @@ struct SearchUi {
     /// testo cercato per ultimo (per il messaggio «nessun risultato»)
     last_query: String,
     last_source: search::Source,
+    /// ricerca per artista: il nome dell'artista trovato
+    artist: Option<String>,
     results: Vec<SearchResult>,
     /// risultati spuntati per scaricarli insieme (stessi indici di `results`)
     selected: Vec<bool>,
@@ -319,6 +321,7 @@ impl App {
         self.search.error = None;
         self.search.notice = None;
         self.search.last_query = query.clone();
+        self.search.artist = None;
         let seq = self.search.seq;
         let toolset = self.toolset();
         let cookies = self.cfg.cookies_browser.clone();
@@ -523,7 +526,9 @@ impl App {
                 }
                 self.search.busy = false;
                 match result {
-                    Ok(r) => {
+                    Ok(outcome) => {
+                        let r = outcome.results;
+                        self.search.artist = outcome.artist;
                         self.search.selected = vec![false; r.len()];
                         self.search.thumbs = vec![None; r.len()];
                         self.start_thumbnails(ctx, seq, &r);
@@ -895,8 +900,18 @@ impl App {
                 Mode::Video => tr!("come video", "as video"),
                 Mode::Audio => tr!("come audio", "as audio"),
             };
-            ui.label(
-                RichText::new(tr!(
+            let header = match (&self.search.artist, self.search.last_source) {
+                (Some(name), search::Source::MusicArtist) => tr!(
+                    format!(
+                        "Discografia di {name}: {} uscite (album e singoli) · «Scarica» scarica tutto l'album {what}, con le opzioni qui sotto.",
+                        res.len()
+                    ),
+                    format!(
+                        "Discography of {name}: {} releases (albums and singles) · “Download” saves the whole album {what}, with the options below.",
+                        res.len()
+                    )
+                ),
+                _ => tr!(
                     format!(
                         "{} risultati su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
                         res.len(),
@@ -909,9 +924,12 @@ impl App {
                         self.search.last_source.label(),
                         self.search.last_query
                     )
-                ))
-                .small()
-                .color(ui.visuals().weak_text_color()),
+                ),
+            };
+            ui.label(
+                RichText::new(header)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
             );
             ui.add_space(2.0);
             egui::ScrollArea::vertical()
@@ -995,15 +1013,7 @@ impl App {
                                 }
                                 let mut meta: Vec<String> = Vec::new();
                                 if r.collection {
-                                    // gli album di YouTube Music hanno indirizzi …/browse/MPREb_…
-                                    meta.push(
-                                        if r.url.contains("/browse/MPREb") {
-                                            "Album"
-                                        } else {
-                                            "Playlist"
-                                        }
-                                        .into(),
-                                    );
+                                    meta.push(release_kind(r).into());
                                 }
                                 if !r.channel.is_empty() {
                                     meta.push(r.channel.clone());
@@ -1156,6 +1166,7 @@ impl App {
             self.search.selected.clear();
             self.search.thumbs.clear();
             self.search.last_query.clear();
+            self.search.artist = None;
             self.search.error = None;
             self.search.notice = None;
         }
@@ -1547,6 +1558,17 @@ impl App {
 
 /// Riquadro della copertina nei risultati della ricerca (16:9, come le miniature YouTube).
 const THUMB_SLOT: egui::Vec2 = egui::vec2(112.0, 63.0);
+
+/// «Album», «Singolo» o «Playlist» per un risultato che raccoglie più brani.
+fn release_kind(r: &SearchResult) -> &'static str {
+    // gli album hanno indirizzi …/browse/MPREb_… (YouTube Music) o playlist OLAK5uy_…
+    let album = r.url.contains("/browse/MPREb") || r.url.contains("list=OLAK5uy");
+    match r.tracks {
+        Some(1..=3) if album => tr!("Singolo", "Single"),
+        _ if album => "Album",
+        _ => "Playlist",
+    }
+}
 
 /// Dimensione di `size` rimpicciolita per stare dentro `slot` senza deformarsi.
 fn fit(size: egui::Vec2, slot: egui::Vec2) -> egui::Vec2 {

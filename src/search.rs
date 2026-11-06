@@ -25,14 +25,17 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 pub enum Source {
     #[default]
     YouTube,
+    /// discografia di un artista: tutti i suoi album e singoli
+    MusicArtist,
     MusicSongs,
     MusicAlbums,
     MusicVideos,
 }
 
 impl Source {
-    pub const ALL: [Source; 4] = [
+    pub const ALL: [Source; 5] = [
         Source::YouTube,
+        Source::MusicArtist,
         Source::MusicSongs,
         Source::MusicAlbums,
         Source::MusicVideos,
@@ -41,6 +44,10 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::YouTube => "YouTube",
+            Source::MusicArtist => tr!(
+                "YouTube Music · artista (discografia)",
+                "YouTube Music · artist (discography)"
+            ),
             Source::MusicSongs => tr!("YouTube Music · brani", "YouTube Music · songs"),
             Source::MusicAlbums => tr!("YouTube Music · album", "YouTube Music · albums"),
             Source::MusicVideos => tr!("YouTube Music · video", "YouTube Music · videos"),
@@ -52,6 +59,7 @@ impl Source {
         let q = query.trim();
         let section = match self {
             Source::YouTube => return format!("ytsearch{count}:{q}"),
+            Source::MusicArtist => "artists",
             Source::MusicSongs => "songs",
             Source::MusicAlbums => "albums",
             Source::MusicVideos => "videos",
@@ -105,6 +113,19 @@ pub fn build_args(
     tools: &Toolset,
     cookies_browser: &str,
 ) -> Vec<String> {
+    // la pagina dei risultati di YouTube Music non ha un limite: lo mette yt-dlp
+    let limit = (source != Source::YouTube).then_some(count);
+    list_args(&source.target(query, count), limit, tools, cookies_browser)
+}
+
+/// Opzioni per far elencare a yt-dlp (senza scaricare) i primi `limit` elementi di
+/// `target`: una ricerca o una pagina che contiene un elenco.
+fn list_args(
+    target: &str,
+    limit: Option<usize>,
+    tools: &Toolset,
+    cookies_browser: &str,
+) -> Vec<String> {
     let mut a: Vec<String> = [
         "--flat-playlist",
         "--skip-download",
@@ -113,7 +134,7 @@ pub fn build_args(
         "--color",
         "never",
         "--print",
-        "%(.{id,title,channel,uploader,artist,artists,creator,duration,view_count,url,webpage_url,ie_key,_type,thumbnail,thumbnails})j",
+        "%(.{id,title,channel,uploader,artist,artists,creator,duration,view_count,url,webpage_url,ie_key,_type,thumbnail,thumbnails,playlist_title,playlist_uploader,playlist_channel})j",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -126,14 +147,13 @@ pub fn build_args(
         a.push("--cookies-from-browser".into());
         a.push(cookies_browser.into());
     }
-    if source != Source::YouTube {
-        // la pagina dei risultati di YouTube Music non ha un limite: lo mette yt-dlp
+    if let Some(n) = limit {
         a.push("--playlist-items".into());
-        a.push(format!("1:{count}"));
+        a.push(format!("1:{n}"));
     }
     // "--": una ricerca che comincia con "-" non diventa un'opzione di yt-dlp
     a.push("--".into());
-    a.push(source.target(query, count));
+    a.push(target.into());
     a
 }
 
@@ -258,13 +278,24 @@ fn is_collection_url(url: &str) -> bool {
 }
 
 /// Esegue la ricerca (bloccante: va chiamata da un thread a parte).
+/// Esito di una ricerca.
+#[derive(Debug, Default)]
+pub struct Outcome {
+    pub results: Vec<SearchResult>,
+    /// ricerca per artista: il nome dell'artista trovato
+    pub artist: Option<String>,
+}
+
 pub fn search(
     source: Source,
     query: &str,
     tools: &Toolset,
     cookies_browser: &str,
     cancel: &AtomicBool,
-) -> Result<Vec<SearchResult>> {
+) -> Result<Outcome> {
+    if source == Source::MusicArtist {
+        return search_artist(query, tools, cookies_browser, cancel);
+    }
     let args = build_args(source, query, RESULTS, tools, cookies_browser);
     let (out, err) = run_ytdlp(tools, &args, cancel, TIMEOUT)?;
     let results: Vec<SearchResult> = out.lines().filter_map(parse_line).collect();
@@ -273,7 +304,100 @@ pub fn search(
             bail!(e);
         }
     }
-    Ok(results)
+    Ok(Outcome {
+        results,
+        artist: None,
+    })
+}
+
+/// Quante uscite (album e singoli) di un artista elencare al massimo.
+const RELEASES: usize = 100;
+
+/// Discografia di un artista, come la pagina «Album» dell'artista su YouTube Music:
+/// 1) si cerca l'artista su YouTube Music e si prende il primo (il più pertinente);
+/// 2) si elenca la scheda «Uscite» del suo canale YouTube, che contiene tutti i suoi
+///    album e singoli, ciascuno come playlist scaricabile per intero.
+fn search_artist(
+    query: &str,
+    tools: &Toolset,
+    cookies_browser: &str,
+    cancel: &AtomicBool,
+) -> Result<Outcome> {
+    let args = list_args(
+        &Source::MusicArtist.target(query, 5),
+        Some(5),
+        tools,
+        cookies_browser,
+    );
+    let (out, err) = run_ytdlp(tools, &args, cancel, TIMEOUT)?;
+    let Some(channel) = out.lines().find_map(channel_id_in) else {
+        if let Some(e) = last_error(&err) {
+            bail!(e);
+        }
+        return Ok(Outcome::default());
+    };
+    let args = list_args(
+        &format!("https://www.youtube.com/channel/{channel}/releases"),
+        Some(RELEASES),
+        tools,
+        cookies_browser,
+    );
+    let (out, err) = run_ytdlp(tools, &args, cancel, Duration::from_secs(90))?;
+    let mut artist = None;
+    let mut results = Vec::new();
+    for line in out.lines() {
+        if artist.is_none() {
+            artist = artist_name(line);
+        }
+        if let Some(mut r) = parse_line(line) {
+            // ogni uscita è un album o un singolo: titolo, numero di brani e copertina
+            // si completano a parte, come per gli album di YouTube Music
+            r.collection = true;
+            r.needs_details = true;
+            results.push(r);
+        }
+    }
+    if results.is_empty() {
+        if let Some(e) = last_error(&err) {
+            bail!(e);
+        }
+    }
+    Ok(Outcome { results, artist })
+}
+
+/// Id del canale (UC + 22 caratteri) contenuto nell'indirizzo o nell'id di una riga di yt-dlp.
+fn channel_id_in(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    ["url", "webpage_url", "id", "channel_id"]
+        .iter()
+        .filter_map(|k| v.get(*k).and_then(Value::as_str))
+        .find_map(find_channel_id)
+}
+
+fn find_channel_id(s: &str) -> Option<String> {
+    let ok = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    s.match_indices("UC").find_map(|(i, _)| {
+        if s[..i].chars().next_back().is_some_and(ok) {
+            return None; // «UC» in mezzo a un'altra parola
+        }
+        let id: String = s[i..].chars().take_while(|c| ok(*c)).collect();
+        (id.len() == 24).then_some(id)
+    })
+}
+
+/// Nome dell'artista dalle informazioni della pagina che contiene l'elenco.
+fn artist_name(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    [
+        "playlist_uploader",
+        "playlist_channel",
+        "channel",
+        "uploader",
+    ]
+    .iter()
+    .filter_map(|k| v.get(*k).and_then(Value::as_str))
+    .map(clean_name)
+    .find(|s| !s.is_empty() && s != "NA")
 }
 
 fn last_error(stderr: &str) -> Option<String> {
@@ -662,6 +786,44 @@ mod tests {
         assert!(a
             .windows(2)
             .any(|w| w[0] == "--playlist-items" && w[1] == "1"));
+    }
+
+    #[test]
+    fn artist_search_finds_the_channel_and_its_releases() {
+        assert_eq!(
+            Source::MusicArtist.target("Francesco Renga", 5),
+            "https://music.youtube.com/search?q=Francesco+Renga#artists"
+        );
+        // l'artista trovato su YouTube Music: …/browse/UC…
+        let l = r#"{"id": "UCk3xZ7ODRSczVq3hsQXlGkg", "url": "https://music.youtube.com/browse/UCk3xZ7ODRSczVq3hsQXlGkg", "ie_key": "YoutubeTab"}"#;
+        assert_eq!(
+            channel_id_in(l).as_deref(),
+            Some("UCk3xZ7ODRSczVq3hsQXlGkg")
+        );
+        assert_eq!(
+            channel_id_in(r#"{"url": "https://music.youtube.com/browse/MPREb_x"}"#),
+            None
+        );
+        assert_eq!(find_channel_id("xUCk3xZ7ODRSczVq3hsQXlGkg"), None);
+        // un'uscita della scheda «Uscite» del canale
+        let l = r#"{"id": "OLAK5uy_abc", "title": "Tracce", "url": "https://www.youtube.com/playlist?list=OLAK5uy_abc", "_type": "url", "playlist_uploader": "Francesco Renga - Topic", "playlist_title": "Francesco Renga - Releases"}"#;
+        assert_eq!(artist_name(l).as_deref(), Some("Francesco Renga"));
+        let r = parse_line(l).unwrap();
+        assert!(r.collection);
+        assert_eq!(r.title, "Tracce");
+        let a = list_args(
+            "https://www.youtube.com/channel/UCk3xZ7ODRSczVq3hsQXlGkg/releases",
+            Some(100),
+            &toolset(),
+            "",
+        );
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--playlist-items" && w[1] == "1:100"));
+        assert_eq!(
+            a.last().unwrap(),
+            "https://www.youtube.com/channel/UCk3xZ7ODRSczVq3hsQXlGkg/releases"
+        );
     }
 
     #[test]

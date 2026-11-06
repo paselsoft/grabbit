@@ -16,6 +16,8 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   risultati di YouTube e premi *Scarica* (subito) o *+* (aggiungi ai link). Si possono
   spuntare più risultati e scaricarli insieme, nel formato scelto (Video o Audio).
   Ogni risultato mostra la copertina (un clic sopra lo seleziona).
+  Con *YouTube Music · artista (discografia)* scrivi il nome di un artista e ottieni tutti i
+  suoi album e singoli, ciascuno da scaricare per intero.
   Si può cercare su **YouTube** o su **YouTube Music** (brani, album o video): un album si
   scarica tutto, in una cartella con il suo nome. Per usare il proprio account Google,
   scegli il browser in cui hai fatto l'accesso in *Opzioni avanzate → Usa i cookie del browser*.

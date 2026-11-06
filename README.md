@@ -16,6 +16,8 @@ The interface is in Italian if your system language is Italian, and in English o
   YouTube results and press *Download* (right away) or *+* (add to the links). You can tick
   several results and download them together, in the chosen format (Video or Audio).
   Each result shows its cover art (click it to select the result).
+  With *YouTube Music · artist (discography)* type an artist's name and get all their
+  albums and singles, each downloadable in full.
   Search **YouTube** or **YouTube Music** (songs, albums or videos): an album is downloaded
   in full, in a folder with its name. To use your Google account, pick the browser you are
   signed in with in *Advanced options → Use browser cookies*.
