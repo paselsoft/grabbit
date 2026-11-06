@@ -480,7 +480,6 @@ fn extract_zip(zip_path: &Path, wanted: &[&str], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 /// Dati del pacchetto imageio-ffmpeg su PyPI (elenco dei file dell'ultima versione).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const PYPI_IMAGEIO_FFMPEG: &str = "https://pypi.org/pypi/imageio-ffmpeg/json";
@@ -526,6 +525,7 @@ fn extract_wheel_ffmpeg(wheel: &Path, exe: &Path) -> Result<()> {
     make_executable(exe)
 }
 
+#[cfg(target_os = "linux")]
 fn extract_tar_xz(path: &Path, dest: &Path) -> Result<()> {
     let file = std::io::BufReader::new(File::open(path)?);
     let mut archive = tar::Archive::new(xz2::read::XzDecoder::new(file));
