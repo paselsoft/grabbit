@@ -269,6 +269,11 @@ pub fn fetch_thumbnail(url: &str, max_w: u32, max_h: u32) -> Result<(u32, u32, V
     decode_thumbnail(&bytes, max_w, max_h)
 }
 
+/// Copertina incorporata in un brano (JPEG o PNG), rimpicciolita a `px` di lato al massimo.
+pub fn decode_cover(bytes: &[u8], px: u32) -> Result<(u32, u32, Vec<u8>)> {
+    decode_thumbnail(bytes, px, px)
+}
+
 fn decode_thumbnail(bytes: &[u8], max_w: u32, max_h: u32) -> Result<(u32, u32, Vec<u8>)> {
     let img = image::load_from_memory(bytes)?;
     let img = img.thumbnail(max_w, max_h).to_rgba8();
