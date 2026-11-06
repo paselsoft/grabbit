@@ -46,6 +46,25 @@ pub fn get_text(url: &str) -> Result<String> {
     Ok(resp.body_mut().read_to_string()?)
 }
 
+/// POST con corpo JSON e risposta JSON (con intestazioni aggiuntive).
+pub fn post_json(
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let mut req = agent().post(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    let mut resp = req.send_json(body).with_context(|| {
+        tr!(
+            format!("richiesta a {url} fallita"),
+            format!("request to {url} failed")
+        )
+    })?;
+    Ok(resp.body_mut().read_json()?)
+}
+
 /// Scarica in memoria un file piccolo (al massimo `limit` byte), ad esempio un'immagine.
 pub fn get_bytes(url: &str, limit: u64) -> Result<Vec<u8>> {
     let mut resp = agent().get(url).call().with_context(|| {

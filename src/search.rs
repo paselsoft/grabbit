@@ -104,6 +104,10 @@ pub struct SearchResult {
     /// album di YouTube Music arrivato senza titolo o copertina: i dati vanno chiesti
     /// a parte con `fetch_details`
     pub needs_details: bool,
+    /// tipo di uscita come lo scrive YouTube Music («Album», «Singolo», «EP»)
+    pub kind: Option<String>,
+    /// anno di uscita
+    pub year: Option<String>,
 }
 
 pub fn build_args(
@@ -212,6 +216,8 @@ pub fn parse_line(line: &str) -> Option<SearchResult> {
         needs_details: collection && (!has_title || thumbnail.is_none()),
         thumbnail,
         tracks: None,
+        kind: None,
+        year: None,
     })
 }
 
@@ -314,9 +320,12 @@ pub fn search(
 const RELEASES: usize = 100;
 
 /// Discografia di un artista, come la pagina «Album» dell'artista su YouTube Music:
-/// 1) si cerca l'artista su YouTube Music e si prende il primo (il più pertinente);
-/// 2) si elenca la scheda «Uscite» del suo canale YouTube, che contiene tutti i suoi
-///    album e singoli, ciascuno come playlist scaricabile per intero.
+/// 1) si cerca l'artista su YouTube Music (con yt-dlp) e si prende il primo, il più
+///    pertinente: il suo id di canale (UC…);
+/// 2) si chiede a YouTube Music la pagina dei suoi album (`browse/MPADUC…`, la pagina
+///    «Album → Altro» del sito); se non c'è (artisti con pochi album) la pagina
+///    dell'artista, dove album e singoli sono in vista; in ultimo la scheda «Uscite»
+///    del canale YouTube.
 fn search_artist(
     query: &str,
     tools: &Toolset,
@@ -336,6 +345,163 @@ fn search_artist(
         }
         return Ok(Outcome::default());
     };
+    let mut errors = Vec::new();
+    for browse_id in [format!("MPAD{channel}"), channel.clone()] {
+        if cancel.load(Ordering::Relaxed) {
+            bail!(tr!("Ricerca annullata", "Search cancelled"));
+        }
+        match ytmusic_browse(&browse_id) {
+            Ok(page) => {
+                let results = ytmusic_releases(&page);
+                if !results.is_empty() {
+                    let artist = page_title(&page).or_else(|| Some(query.trim().to_string()));
+                    return Ok(Outcome { results, artist });
+                }
+            }
+            Err(e) => errors.push(format!("{e:#}")),
+        }
+    }
+    match releases_tab(&channel, tools, cookies_browser, cancel) {
+        Ok(o) if !o.results.is_empty() => Ok(o),
+        Ok(o) if errors.is_empty() => Ok(o),
+        Ok(_) => bail!(errors.join("; ")),
+        Err(e) => {
+            errors.push(format!("{e:#}"));
+            bail!(errors.join("; "))
+        }
+    }
+}
+
+/// Chiede a YouTube Music una pagina (`browse`) come fa il suo sito, senza account.
+fn ytmusic_browse(browse_id: &str) -> Result<Value> {
+    let hl = if crate::i18n::is_italian() {
+        "it"
+    } else {
+        "en"
+    };
+    let body = serde_json::json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": YTMUSIC_CLIENT_VERSION,
+                "hl": hl,
+            }
+        },
+        "browseId": browse_id,
+    });
+    crate::net::post_json(
+        "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false",
+        &[
+            ("Origin", "https://music.youtube.com"),
+            ("Referer", "https://music.youtube.com/"),
+            ("X-YouTube-Client-Name", "67"),
+            ("X-YouTube-Client-Version", YTMUSIC_CLIENT_VERSION),
+        ],
+        &body,
+    )
+}
+
+const YTMUSIC_CLIENT_VERSION: &str = "1.20251027.01.00";
+
+/// Tutti gli elementi di tipo `key` (a qualsiasi profondità) di una risposta di YouTube.
+fn collect<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
+    match v {
+        Value::Object(m) => {
+            for (k, c) in m {
+                if k == key {
+                    out.push(c);
+                } else {
+                    collect(c, key, out);
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|c| collect(c, key, out)),
+        _ => {}
+    }
+}
+
+fn runs_text(v: Option<&Value>) -> Vec<String> {
+    v.and_then(|t| t.get("runs"))
+        .and_then(Value::as_array)
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|r| r.get("text").and_then(Value::as_str))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s != "•")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Album e singoli (riquadri con un id «MPREb_…») di una pagina di YouTube Music.
+fn ytmusic_releases(page: &Value) -> Vec<SearchResult> {
+    let mut items = Vec::new();
+    collect(page, "musicTwoRowItemRenderer", &mut items);
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .filter_map(|it| {
+            let mut ids = Vec::new();
+            collect(it, "browseId", &mut ids);
+            let id = ids
+                .into_iter()
+                .filter_map(Value::as_str)
+                .find(|s| s.starts_with("MPREb"))?
+                .to_string();
+            if !seen.insert(id.clone()) {
+                return None; // lo stesso album in due sezioni della pagina
+            }
+            let title = runs_text(it.get("title")).join(" ");
+            let subtitle = runs_text(it.get("subtitle"));
+            let year = subtitle
+                .iter()
+                .find(|s| s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()))
+                .cloned();
+            let kind = subtitle
+                .first()
+                .filter(|s| Some(*s) != year.as_ref())
+                .cloned();
+            let mut thumbs = Vec::new();
+            collect(it, "thumbnails", &mut thumbs);
+            let url = format!("https://music.youtube.com/browse/{id}");
+            let thumbnail = thumbs
+                .first()
+                .and_then(|t| pick_thumbnail(&serde_json::json!({ "thumbnails": t }), &url));
+            Some(SearchResult {
+                needs_details: title.is_empty() || thumbnail.is_none(),
+                title: if title.is_empty() { url.clone() } else { title },
+                channel: String::new(),
+                duration: None,
+                views: None,
+                url,
+                collection: true,
+                thumbnail,
+                tracks: None,
+                kind,
+                year,
+            })
+        })
+        .collect()
+}
+
+/// Titolo della pagina (il nome dell'artista) dall'intestazione.
+fn page_title(page: &Value) -> Option<String> {
+    let header = page.get("header")?;
+    let mut titles = Vec::new();
+    collect(header, "title", &mut titles);
+    titles
+        .into_iter()
+        .map(|t| runs_text(Some(t)).join(" "))
+        .find(|s| !s.is_empty())
+}
+
+/// Ultima possibilità: la scheda «Uscite» del canale YouTube (non tutti i canali la hanno).
+fn releases_tab(
+    channel: &str,
+    tools: &Toolset,
+    cookies_browser: &str,
+    cancel: &AtomicBool,
+) -> Result<Outcome> {
     let args = list_args(
         &format!("https://www.youtube.com/channel/{channel}/releases"),
         Some(RELEASES),
@@ -824,6 +990,49 @@ mod tests {
             a.last().unwrap(),
             "https://www.youtube.com/channel/UCk3xZ7ODRSczVq3hsQXlGkg/releases"
         );
+    }
+
+    #[test]
+    fn reads_the_albums_page_of_youtube_music() {
+        // forma della risposta di music.youtube.com/youtubei/v1/browse per «MPADUC…»
+        let page: Value = serde_json::from_str(
+            r#"{
+            "header": {"musicHeaderRenderer": {"title": {"runs": [{"text": "Francesco Renga"}]}}},
+            "contents": {"singleColumnBrowseResultsRenderer": {"tabs": [{"tabRenderer": {"content": {
+              "sectionListRenderer": {"contents": [{"gridRenderer": {"items": [
+                {"musicTwoRowItemRenderer": {
+                  "thumbnailRenderer": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails": [
+                    {"url": "https://lh3.googleusercontent.com/a=w226-h226", "width": 226, "height": 226},
+                    {"url": "https://lh3.googleusercontent.com/a=w544-h544", "width": 544, "height": 544}]}}},
+                  "title": {"runs": [{"text": "L'altra metà", "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_altrameta"}}}]},
+                  "subtitle": {"runs": [{"text": "Album"}, {"text": " • "}, {"text": "2019"}]},
+                  "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_altrameta"}}}},
+                {"musicTwoRowItemRenderer": {
+                  "title": {"runs": [{"text": "Il meglio di me"}]},
+                  "subtitle": {"runs": [{"text": "Singolo"}, {"text": " • "}, {"text": "2026"}]},
+                  "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_meglio"}}}},
+                {"musicTwoRowItemRenderer": {
+                  "title": {"runs": [{"text": "Un video"}]},
+                  "navigationEndpoint": {"watchEndpoint": {"videoId": "abcdefghijk"}}}}
+              ]}}]}}}}]}}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(page_title(&page).as_deref(), Some("Francesco Renga"));
+        let r = ytmusic_releases(&page);
+        assert_eq!(r.len(), 2, "il video non è un'uscita");
+        assert_eq!(r[0].title, "L'altra metà");
+        assert_eq!(r[0].url, "https://music.youtube.com/browse/MPREb_altrameta");
+        assert_eq!(r[0].kind.as_deref(), Some("Album"));
+        assert_eq!(r[0].year.as_deref(), Some("2019"));
+        assert_eq!(
+            r[0].thumbnail.as_deref(),
+            Some("https://lh3.googleusercontent.com/a=w544-h544")
+        );
+        assert!(r[0].collection && !r[0].needs_details);
+        // senza copertina nei dati: va completato a parte
+        assert_eq!(r[1].kind.as_deref(), Some("Singolo"));
+        assert!(r[1].needs_details);
     }
 
     #[test]

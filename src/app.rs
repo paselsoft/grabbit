@@ -1013,7 +1013,10 @@ impl App {
                                 }
                                 let mut meta: Vec<String> = Vec::new();
                                 if r.collection {
-                                    meta.push(release_kind(r).into());
+                                    meta.push(release_kind(r));
+                                }
+                                if let Some(y) = &r.year {
+                                    meta.push(y.clone());
                                 }
                                 if !r.channel.is_empty() {
                                     meta.push(r.channel.clone());
@@ -1560,7 +1563,11 @@ impl App {
 const THUMB_SLOT: egui::Vec2 = egui::vec2(112.0, 63.0);
 
 /// «Album», «Singolo» o «Playlist» per un risultato che raccoglie più brani.
-fn release_kind(r: &SearchResult) -> &'static str {
+fn release_kind(r: &SearchResult) -> String {
+    // come lo scrive YouTube Music, quando lo dice («Album», «Singolo», «EP»)
+    if let Some(k) = &r.kind {
+        return k.clone();
+    }
     // gli album hanno indirizzi …/browse/MPREb_… (YouTube Music) o playlist OLAK5uy_…
     let album = r.url.contains("/browse/MPREb") || r.url.contains("list=OLAK5uy");
     match r.tracks {
@@ -1568,6 +1575,7 @@ fn release_kind(r: &SearchResult) -> &'static str {
         _ if album => "Album",
         _ => "Playlist",
     }
+    .into()
 }
 
 /// Dimensione di `size` rimpicciolita per stare dentro `slot` senza deformarsi.
