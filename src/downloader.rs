@@ -195,7 +195,8 @@ pub fn run(
                 .into(),
             ));
             if let Some(title) = probe_playlist_title(&job, &cfg, &tools, &cancel) {
-                let folder = sanitize(&title);
+                // «Album - Titolo» (così lo chiama YouTube) → «Titolo»
+                let folder = sanitize(&crate::search::clean_name(&title));
                 if !folder.is_empty() {
                     emit(Event::Log(tr!(
                         format!("Playlist «{title}»: salvo i file nella cartella «{folder}»"),
@@ -350,15 +351,16 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     }
 
     if audio {
+        // Se YouTube ha già l'audio nel formato scelto (M4A = AAC, Opus/Vorbis = WebM),
+        // si prende quello: ffmpeg lo copia senza ricodificarlo (più veloce, qualità originale).
+        let format = match cfg.audio_format.as_str() {
+            "m4a" => "bestaudio[ext=m4a]/bestaudio/best",
+            "opus" => "bestaudio[acodec=opus]/bestaudio/best",
+            _ => "bestaudio/best",
+        };
         add(
             &mut a,
-            &[
-                "-f",
-                "bestaudio/best",
-                "-x",
-                "--audio-format",
-                &cfg.audio_format,
-            ],
+            &["-f", format, "-x", "--audio-format", &cfg.audio_format],
         );
         if !matches!(cfg.audio_format.as_str(), "flac" | "wav") {
             add(
@@ -689,6 +691,23 @@ mod tests {
         assert!(has_pair(&a, "--audio-format", "mp3"));
         assert!(has_pair(&a, "--audio-quality", "320K"));
         assert!(a.contains(&"--embed-thumbnail".to_string()));
+    }
+
+    #[test]
+    fn m4a_and_opus_prefer_the_original_youtube_audio() {
+        for (fmt, sel) in [
+            ("m4a", "bestaudio[ext=m4a]/bestaudio/best"),
+            ("opus", "bestaudio[acodec=opus]/bestaudio/best"),
+            ("mp3", "bestaudio/best"),
+        ] {
+            let cfg = Config {
+                mode: Mode::Audio,
+                audio_format: fmt.into(),
+                ..Config::default()
+            };
+            let a = build_args(&job("https://youtu.be/x", None, false), &cfg, &toolset());
+            assert!(has_pair(&a, "-f", sel), "{fmt}");
+        }
     }
 
     #[test]

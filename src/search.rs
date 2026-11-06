@@ -676,7 +676,7 @@ pub fn details_args(url: &str, tools: &Toolset, cookies_browser: &str) -> Vec<St
 }
 
 /// Toglie le aggiunte di YouTube ai nomi: «Album - X» → «X», «Artista - Topic» → «Artista».
-fn clean_name(s: &str) -> String {
+pub(crate) fn clean_name(s: &str) -> String {
     let s = s.trim();
     let s = s
         .strip_prefix("Album - ")
