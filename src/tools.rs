@@ -44,7 +44,32 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    #[cfg(target_os = "macos")]
+    c.env("PATH", macos_path());
     c
+}
+
+/// Le app aperte dal Finder ricevono un PATH minimo (/usr/bin:/bin:…): senza le cartelle
+/// dove si installano Python (python.org) e Homebrew, la versione di yt-dlp per Python
+/// (che si avvia con `#!/usr/bin/env python3`) non troverebbe python3.
+#[cfg(target_os = "macos")]
+fn macos_path() -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for extra in [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/usr/bin",
+        "/bin",
+    ] {
+        let extra = PathBuf::from(extra);
+        if !dirs.contains(&extra) {
+            dirs.push(extra);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -69,11 +94,30 @@ fn pct(done: u64, total: Option<u64>) -> String {
 
 // ───────────────────────────── yt-dlp ─────────────────────────────
 
+/// Versione di yt-dlp che gira con Python (un unico file che comincia con `#!`):
+/// serve sui Mac in cui `yt-dlp_macos` non parte (macOS precedenti a 10.15).
+const YTDLP_PYTHON: &str = "yt-dlp";
+
+/// Il yt-dlp installato è la versione per Python? (si riconosce da `#!` all'inizio)
+fn installed_is_python_zipapp() -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    File::open(ytdlp_path())
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|_| &head == b"#!")
+        .unwrap_or(false)
+}
+
 fn ytdlp_asset() -> &'static str {
     if cfg!(windows) {
         "yt-dlp.exe"
     } else if cfg!(target_os = "macos") {
-        "yt-dlp_macos"
+        // una volta passati alla versione per Python, gli aggiornamenti restano su quella
+        if installed_is_python_zipapp() {
+            YTDLP_PYTHON
+        } else {
+            "yt-dlp_macos"
+        }
     } else if cfg!(target_arch = "aarch64") {
         "yt-dlp_linux_aarch64"
     } else {
@@ -108,10 +152,11 @@ fn latest_ytdlp_version() -> Result<String> {
 }
 
 fn install_ytdlp(status: &mut dyn FnMut(String)) -> Result<()> {
-    let url = format!(
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}",
-        ytdlp_asset()
-    );
+    install_ytdlp_asset(ytdlp_asset(), status)
+}
+
+fn install_ytdlp_asset(asset: &str, status: &mut dyn FnMut(String)) -> Result<()> {
+    let url = format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}");
     let dest = ytdlp_path();
     net::download(&url, &dest, &mut |d, t| {
         status(tr!(
@@ -151,12 +196,33 @@ pub fn ensure_ytdlp(status: &mut dyn FnMut(String)) -> Result<String> {
             }
         }
     }
-    local_ytdlp_version().ok_or_else(|| {
-        anyhow!(tr!(
-            "yt-dlp non si avvia dopo l'installazione",
-            "yt-dlp does not start after installation"
-        ))
-    })
+    if let Some(v) = local_ytdlp_version() {
+        return Ok(v);
+    }
+    // macOS vecchi (High Sierra, Mojave): yt-dlp_macos richiede macOS 10.15 e non parte.
+    // Si passa alla versione per Python, che funziona se è installato Python 3.10 o più recente.
+    if cfg!(target_os = "macos") && !installed_is_python_zipapp() {
+        status(
+            tr!(
+                "Questa versione di macOS è troppo vecchia per yt-dlp: provo la versione per Python…",
+                "This macOS version is too old for yt-dlp: trying the Python version…"
+            )
+            .into(),
+        );
+        install_ytdlp_asset(YTDLP_PYTHON, status)
+            .context(tr!("installazione di yt-dlp", "installing yt-dlp"))?;
+        if let Some(v) = local_ytdlp_version() {
+            return Ok(v);
+        }
+        bail!(tr!(
+            "su questa versione di macOS yt-dlp ha bisogno di Python 3.10 o più recente. Installalo da python.org (Python 3.13, «macOS installer», poi apri «Install Certificates.command» nella cartella Applicazioni → Python 3.13) e premi Riprova.",
+            "on this macOS version yt-dlp needs Python 3.10 or newer. Install it from python.org (Python 3.13, “macOS installer”, then open “Install Certificates.command” in Applications → Python 3.13) and press Retry."
+        ));
+    }
+    bail!(tr!(
+        "yt-dlp non si avvia dopo l'installazione",
+        "yt-dlp does not start after installation"
+    ))
 }
 
 // ───────────────────────────── Deno ─────────────────────────────
@@ -177,7 +243,9 @@ fn deno_target() -> Option<&'static str> {
 pub fn ensure_deno(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
     let dest = deno_path();
     if dest.exists() {
-        return Ok(dest);
+        // già scaricato: va usato solo se parte davvero. Se non parte (es. macOS troppo
+        // vecchio) non lo si riscarica a ogni avvio: si avvisa e basta.
+        return check_deno(dest);
     }
     let target = deno_target().ok_or_else(|| {
         anyhow!(tr!(
@@ -202,7 +270,23 @@ pub fn ensure_deno(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
             "Deno not found in the archive"
         ));
     }
-    Ok(dest)
+    check_deno(dest)
+}
+
+fn check_deno(dest: PathBuf) -> Result<PathBuf> {
+    let runs = command(&dest)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if runs {
+        Ok(dest)
+    } else {
+        bail!(tr!(
+            "Deno non funziona su questa versione del sistema operativo",
+            "Deno does not work on this operating system version"
+        ))
+    }
 }
 
 // ───────────────────────────── ffmpeg ─────────────────────────────
