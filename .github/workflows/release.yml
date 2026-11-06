@@ -69,6 +69,13 @@ jobs:
               exit 1
             fi
             if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+              if [[ "$V" == "$CARGO_V" ]]; then
+                # tag e versione ci sono già (una pubblicazione precedente non è riuscita):
+                # si ricompila da quel tag e si ripubblica la release
+                echo "::notice::Il tag v$V esiste già ed è la versione attuale: ripubblico la release da quel tag."
+                { echo "ref=v$V"; echo "version=$V"; echo "publish=true"; } >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
               echo "::error::Esiste già il tag v$V. Scegli una versione più alta."
               exit 1
             fi
@@ -229,7 +236,7 @@ jobs:
           merge-multiple: true
       - name: Elenco dei file
         run: ls -la release
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3 (Node.js 24)
         with:
           tag_name: ${{ needs.prepare.outputs.ref }}
           name: Grabbit ${{ needs.prepare.outputs.version }}
