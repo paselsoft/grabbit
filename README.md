@@ -21,6 +21,8 @@ The interface is in Italian if your system language is Italian, and in English o
   Search **YouTube** or **YouTube Music** (songs, albums or videos): an album is downloaded
   in full, in a folder with its name. To use your Google account, pick the browser you are
   signed in with in *Advanced options → Use browser cookies*.
+- **Several downloads at once** (3 by default, 1 to 4 in the advanced options): an album is split
+  into its tracks, downloaded in parallel, with the track number also in the metadata.
 - **Playlists**: files go into a folder named after the playlist and are called
   `1 - Title.mp4`, `2 - Title.mp4`… (the playlist name is not part of the file name).
 - Cover art and metadata embedded in the files.

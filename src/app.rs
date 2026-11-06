@@ -584,6 +584,7 @@ impl App {
                         state: JobState::Waiting,
                     });
                 }
+                Event::JobRemoved { id } => self.jobs.retain(|j| j.id != id),
                 Event::JobLabel { id, label } => {
                     if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                         j.label = label;
@@ -1466,6 +1467,29 @@ impl App {
                             }
                         });
                     ui.label(RichText::new(tr!("(oppure Ctrl + e Ctrl −)", "(or Ctrl + and Ctrl −)")).small().color(ui.visuals().weak_text_color()));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Download contemporanei", "Simultaneous downloads"));
+                    egui::ComboBox::from_id_salt("parallel")
+                        .selected_text(self.cfg.parallel.clamp(1, 4).to_string())
+                        .show_ui(ui, |ui| {
+                            for n in 1..=4u32 {
+                                if ui
+                                    .selectable_value(&mut self.cfg.parallel, n, n.to_string())
+                                    .clicked()
+                                {
+                                    self.cfg.save();
+                                }
+                            }
+                        });
+                    ui.label(
+                        RichText::new(tr!(
+                            "(brani scaricati insieme: gli album si scaricano prima)",
+                            "(tracks downloaded at the same time: albums finish sooner)"
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
                 });
                 ui.checkbox(&mut self.cfg.auto_update_app, tr!("Installa automaticamente gli aggiornamenti di Grabbit", "Install Grabbit updates automatically"));
                 ui.horizontal(|ui| {

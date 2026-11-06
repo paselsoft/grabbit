@@ -14,10 +14,28 @@ use std::time::{Duration, Instant};
 
 pub enum Event {
     Log(String),
-    JobAdded { id: usize, label: String },
-    JobLabel { id: usize, label: String },
-    JobProgress { id: usize, pct: f32, detail: String },
-    JobFinished { id: usize, ok: bool, detail: String },
+    JobAdded {
+        id: usize,
+        label: String,
+    },
+    JobLabel {
+        id: usize,
+        label: String,
+    },
+    /// lavoro sostituito da altri (un album diventa i suoi brani)
+    JobRemoved {
+        id: usize,
+    },
+    JobProgress {
+        id: usize,
+        pct: f32,
+        detail: String,
+    },
+    JobFinished {
+        id: usize,
+        ok: bool,
+        detail: String,
+    },
     Finished,
 }
 
@@ -74,6 +92,8 @@ struct Job {
     out_name: Option<String>,
     subdir: Option<String>,
     audio_only: bool,
+    /// numero del brano nell'album: va anche nei metadati del file
+    track: Option<usize>,
 }
 
 /// Toglie i caratteri non ammessi nei nomi file.
@@ -139,6 +159,7 @@ pub fn run(
                             out_name: Some(name),
                             subdir: multi.then(|| sanitize(&col.name)),
                             audio_only: true,
+                            track: None,
                         });
                         next += 1;
                     }
@@ -164,6 +185,7 @@ pub fn run(
                 out_name: None,
                 subdir: None,
                 audio_only: false,
+                track: None,
             });
             next += 1;
         }
@@ -175,44 +197,108 @@ pub fn run(
         });
     }
 
-    // 2) esegue i lavori uno alla volta
-    for mut job in jobs {
-        if cancel.load(Ordering::Relaxed) {
-            emit(Event::JobFinished {
-                id: job.id,
-                ok: false,
-                detail: tr!("Annullato", "Cancelled").into(),
-            });
+    // 2) un link che è una playlist (un album) diventa un lavoro per ogni brano, nella
+    //    cartella con il nome della playlist: così i brani si scaricano in parallelo
+    let mut queue: Vec<Job> = Vec::new();
+    for job in jobs {
+        if cancel.load(Ordering::Relaxed)
+            || job.out_name.is_some()
+            || job.subdir.is_some()
+            || looks_like_single_video(&job.target)
+        {
+            queue.push(job);
             continue;
         }
-        // link che può essere una playlist: cartella con il nome della playlist
-        if job.out_name.is_none() && job.subdir.is_none() && !looks_like_single_video(&job.target) {
-            emit(Event::Log(
-                tr!(
-                    "Controllo se il link è una playlist…",
-                    "Checking whether the link is a playlist…"
-                )
-                .into(),
-            ));
-            if let Some(title) = probe_playlist_title(&job, &cfg, &tools, &cancel) {
-                // «Album - Titolo» (così lo chiama YouTube) → «Titolo»
-                let folder = sanitize(&crate::search::clean_name(&title));
-                if !folder.is_empty() {
-                    emit(Event::Log(tr!(
-                        format!("Playlist «{title}»: salvo i file nella cartella «{folder}»"),
-                        format!("Playlist “{title}”: saving the files in the folder “{folder}”")
-                    )));
-                    job.subdir = Some(folder);
-                }
-            }
+        emit(Event::Log(
+            tr!(
+                "Controllo se il link è una playlist e leggo l'elenco dei brani…",
+                "Checking whether the link is a playlist and reading its tracks…"
+            )
+            .into(),
+        ));
+        let Some((title, entries)) = list_playlist(&job, &cfg, &tools, &cancel) else {
+            queue.push(job);
+            continue;
+        };
+        // «Album - Titolo» (così lo chiama YouTube) → «Titolo»
+        let folder = sanitize(&crate::search::clean_name(&title));
+        emit(Event::Log(tr!(
+            format!(
+                "Playlist «{title}»: {} brani, salvati nella cartella «{folder}»",
+                entries.len()
+            ),
+            format!(
+                "Playlist “{title}”: {} tracks, saved in the folder “{folder}”",
+                entries.len()
+            )
+        )));
+        emit(Event::JobRemoved { id: job.id });
+        for e in entries {
+            let j = Job {
+                id: next,
+                out_name: Some(sanitize(&format!("{} - {}", e.index, e.title))),
+                label: e.title,
+                target: e.url,
+                subdir: (!folder.is_empty()).then(|| folder.clone()),
+                audio_only: job.audio_only,
+                track: Some(e.index),
+            };
+            next += 1;
+            emit(Event::JobAdded {
+                id: j.id,
+                label: j.label.clone(),
+            });
+            queue.push(j);
         }
-        let (ok, detail) = run_job(&job, &cfg, &tools, &emit, &cancel);
-        emit(Event::JobFinished {
-            id: job.id,
-            ok,
-            detail,
-        });
     }
+
+    // 3) esegue i lavori, alcuni alla volta: YouTube limita la velocità di ogni singolo
+    //    download, non quella della connessione, quindi in parallelo si fa prima
+    let workers = (cfg.parallel.clamp(1, 4) as usize).min(queue.len().max(1));
+    let tagged = workers > 1;
+    let queue = std::sync::Mutex::new(
+        queue
+            .into_iter()
+            .enumerate()
+            .collect::<std::collections::VecDeque<_>>(),
+    );
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| loop {
+                // il lucchetto della coda si rilascia subito, prima del download
+                let next = queue.lock().ok().and_then(|mut q| q.pop_front());
+                let Some((n, job)) = next else {
+                    break;
+                };
+                if cancel.load(Ordering::Relaxed) {
+                    emit(Event::JobFinished {
+                        id: job.id,
+                        ok: false,
+                        detail: tr!("Annullato", "Cancelled").into(),
+                    });
+                    continue;
+                }
+                // con più download insieme le righe del registro si mescolano:
+                // ognuna porta il numero del suo download
+                let job_emit: Emit = if tagged {
+                    let emit = emit.clone();
+                    let tag = format!("#{} ", n + 1);
+                    Arc::new(move |e| match e {
+                        Event::Log(l) => emit(Event::Log(format!("{tag}{l}"))),
+                        other => emit(other),
+                    })
+                } else {
+                    emit.clone()
+                };
+                let (ok, detail) = run_job(&job, &cfg, &tools, &job_emit, &cancel);
+                emit(Event::JobFinished {
+                    id: job.id,
+                    ok,
+                    detail,
+                });
+            });
+        }
+    });
     emit(Event::Finished);
 }
 
@@ -228,27 +314,57 @@ fn looks_like_single_video(url: &str) -> bool {
         || u.contains("youtube.com/live/")
 }
 
-/// Chiede a yt-dlp il titolo della playlist a cui appartiene il link.
+/// Un brano di una playlist.
+#[derive(Debug, PartialEq)]
+struct Entry {
+    url: String,
+    title: String,
+    /// posizione nella playlist (da 1)
+    index: usize,
+}
+
+/// Legge una riga di `--print "%(.{…})j"` dell'elenco di una playlist:
+/// (titolo della playlist, brano).
+fn parse_entry(line: &str, fallback_index: usize) -> Option<(Option<String>, Entry)> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "NA")
+            .map(String::from)
+    };
+    let url = text("url")
+        .filter(|u| u.starts_with("http"))
+        .or_else(|| text("id").map(|id| format!("https://www.youtube.com/watch?v={id}")))?;
+    let index = v
+        .get("playlist_index")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(fallback_index);
+    let title = text("title").unwrap_or_else(|| url.clone());
+    Some((text("playlist_title"), Entry { url, title, index }))
+}
+
+/// Chiede a yt-dlp l'elenco dei brani della playlist del link (senza scaricarli).
 /// `None` se il link non è una playlist, o se la richiesta non riesce o va in timeout:
-/// in quel caso i file vanno semplicemente nella cartella scelta.
-fn probe_playlist_title(
+/// in quel caso il link si scarica così com'è, nella cartella scelta.
+fn list_playlist(
     job: &Job,
     cfg: &Config,
     tools: &Toolset,
     cancel: &AtomicBool,
-) -> Option<String> {
+) -> Option<(String, Vec<Entry>)> {
     let mut a: Vec<String> = Vec::new();
     add(
         &mut a,
         &[
             "--flat-playlist",
-            "--playlist-items",
-            "1",
             "--skip-download",
             "--no-warnings",
             "--ignore-errors",
             "--print",
-            "%(playlist_title|)s",
+            "%(.{id,url,title,playlist_title,playlist_index})j",
         ],
     );
     // stessa scelta del download vero: con "--no-playlist" un link video+lista è un solo video
@@ -276,6 +392,14 @@ fn probe_playlist_title(
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // letto in un thread a parte: con playlist lunghe l'uscita riempirebbe il canale
+    // e yt-dlp resterebbe bloccato
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        out
+    });
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -283,19 +407,25 @@ fn probe_playlist_title(
             Ok(None) => {}
             Err(_) => return None,
         }
-        if cancel.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(60) {
+        if cancel.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(120) {
             terminate(&mut child);
             let _ = child.wait();
             return None;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    out.lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(String::from)
+    let out = reader.join().ok()?;
+    let mut title = None;
+    let mut entries = Vec::new();
+    for (i, line) in out.lines().enumerate() {
+        if let Some((t, e)) = parse_entry(line, i + 1) {
+            title = title.or(t);
+            entries.push(e);
+        }
+    }
+    // senza titolo di playlist è un video singolo (es. un link video+lista con «--no-playlist»)
+    let title = title?;
+    (!entries.is_empty()).then_some((title, entries))
 }
 
 fn add(a: &mut Vec<String>, items: &[&str]) {
@@ -348,6 +478,13 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         add(&mut a, &["--yes-playlist"]);
     } else {
         add(&mut a, &["--no-playlist"]);
+    }
+    // brano di un album scaricato da solo: il numero del brano va nei metadati
+    if let Some(n) = job.track {
+        add(
+            &mut a,
+            &["--parse-metadata", &format!("{n}:%(track_number)s")],
+        );
     }
 
     if audio {
@@ -642,7 +779,148 @@ mod tests {
             out_name: out_name.map(String::from),
             subdir: None,
             audio_only,
+            track: None,
         }
+    }
+
+    /// Con un finto yt-dlp (uno script che impiega 1 s per «download»): un album diventa i
+    /// suoi brani numerati nella cartella dell'album, e 3 download vanno in parallelo.
+    #[cfg(unix)]
+    #[test]
+    fn albums_are_split_into_tracks_and_downloaded_in_parallel() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(format!("grabbit-par-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let fake = dir.join("fake-yt-dlp");
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/bin/sh
+last=""; for a in "$@"; do last="$a"; done
+echo "$*" >> "{log}"
+case " $* " in *" --flat-playlist "*)
+  case "$last" in *album*)
+    for i in 1 2 3 4; do echo "{{\"id\":\"id$i\",\"url\":\"https://x.test/watch?v=$i\",\"title\":\"Brano $i\",\"playlist_title\":\"Album - Disco\",\"playlist_index\":$i}}"; done;;
+  esac
+  exit 0;;
+esac
+sleep 1
+echo "GRB|1|1|1|1|0|NA|NA|t"
+echo "GRBFILE|/x/$last"
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ev = events.clone();
+        let emit: Emit = Arc::new(move |e| {
+            let s = match e {
+                Event::JobAdded { label, .. } => format!("added {label}"),
+                Event::JobRemoved { .. } => "removed".into(),
+                Event::JobFinished { ok, .. } => format!("finished {ok}"),
+                _ => return,
+            };
+            ev.lock().unwrap().push(s);
+        });
+        let cfg = Config {
+            mode: Mode::Audio,
+            out_dir: dir.clone(),
+            parallel: 3,
+            ..Config::default()
+        };
+        let tools = Toolset {
+            ytdlp: fake,
+            ffmpeg_dir: None,
+            js: None,
+        };
+        let started = Instant::now();
+        run(
+            vec!["https://x.test/album".into(), "https://x.test/other".into()],
+            cfg,
+            tools,
+            0,
+            emit,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let secs = started.elapsed().as_secs_f32();
+        let ev = events.lock().unwrap();
+        // l'album è sostituito dai suoi 4 brani; l'altro link resta com'è
+        assert_eq!(ev.iter().filter(|e| *e == "removed").count(), 1, "{ev:?}");
+        for i in 1..=4 {
+            assert!(ev.contains(&format!("added Brano {i}")), "{ev:?}");
+        }
+        assert_eq!(
+            ev.iter().filter(|e| *e == "finished true").count(),
+            5,
+            "{ev:?}"
+        );
+        // 5 download da 1 s con 3 alla volta: 2 giri, non 5
+        assert!(
+            secs < 3.5,
+            "troppo lento per essere in parallelo: {secs:.1} s"
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let downloads: Vec<&str> = calls
+            .lines()
+            .filter(|l| !l.contains("--flat-playlist"))
+            .collect();
+        assert_eq!(downloads.len(), 5);
+        let track3 = downloads
+            .iter()
+            .find(|l| l.ends_with("https://x.test/watch?v=3"))
+            .expect("brano 3 scaricato dal suo link");
+        assert!(track3.contains("3:%(track_number)s"), "{track3}");
+        assert!(track3.contains("3 - Brano 3.%(ext)s"), "{track3}");
+        assert!(
+            track3.contains(&dir.join("Disco").display().to_string()),
+            "{track3}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playlist_entries_become_numbered_tracks() {
+        let l = r#"{"id": "gVYHLmeHmCc", "url": "https://music.youtube.com/watch?v=gVYHLmeHmCc", "title": "Angelo (VENTI Edition)", "playlist_title": "Album - Scriverò il tuo nome - Live", "playlist_index": 1}"#;
+        let (t, e) = parse_entry(l, 9).unwrap();
+        assert_eq!(t.as_deref(), Some("Album - Scriverò il tuo nome - Live"));
+        assert_eq!(
+            e,
+            Entry {
+                url: "https://music.youtube.com/watch?v=gVYHLmeHmCc".into(),
+                title: "Angelo (VENTI Edition)".into(),
+                index: 1
+            }
+        );
+        // senza url e senza indice: link dall'id, posizione nell'elenco
+        let (t, e) = parse_entry(r#"{"id": "abcdefghijk", "title": "X"}"#, 3).unwrap();
+        assert_eq!(t, None);
+        assert_eq!(e.url, "https://www.youtube.com/watch?v=abcdefghijk");
+        assert_eq!(e.index, 3);
+        assert!(parse_entry("[youtube:tab] testo", 1).is_none());
+    }
+
+    #[test]
+    fn album_tracks_carry_their_track_number() {
+        let cfg = Config {
+            mode: Mode::Audio,
+            ..Config::default()
+        };
+        let mut j = job(
+            "https://music.youtube.com/watch?v=x",
+            Some("7 - Titolo"),
+            false,
+        );
+        j.track = Some(7);
+        let a = build_args(&j, &cfg, &toolset());
+        assert!(has_pair(&a, "--parse-metadata", "7:%(track_number)s"));
+        assert!(has_pair(&a, "-o", "7 - Titolo.%(ext)s"));
+        assert!(a.contains(&"--no-playlist".to_string()));
     }
 
     fn toolset() -> Toolset {
@@ -925,6 +1203,7 @@ mod tests {
                 Event::JobLabel { label, .. } => format!("label: {label}"),
                 Event::JobProgress { pct, detail, .. } => format!("progress: {pct:.2} {detail}"),
                 Event::JobFinished { ok, detail, .. } => format!("finished: {ok} {detail}"),
+                Event::JobRemoved { .. } => "removed".into(),
                 Event::Finished => "done".into(),
             })
         });
