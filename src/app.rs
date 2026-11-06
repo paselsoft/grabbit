@@ -183,6 +183,8 @@ pub struct App {
     /// l'aggiornamento in corso è partito da solo (non da un clic): a fine lavoro si riavvia
     update_auto: bool,
     logo: egui::TextureHandle,
+    /// quando è stato copiato il registro (per mostrare «Copiato» per qualche secondo)
+    log_copied: Option<std::time::Instant>,
 }
 
 impl App {
@@ -208,6 +210,7 @@ impl App {
             auto_install: !std::env::args().any(|a| a == selfupdate::AFTER_UPDATE_ARG),
             update_auto: false,
             logo,
+            log_copied: None,
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -629,7 +632,7 @@ impl eframe::App for App {
                     self.action_row(ui, ctx);
                     ui.add_space(10.0);
                     self.queue(ui);
-                    self.log_view(ui);
+                    self.log_view(ui, ctx);
                     ui.add_space(6.0);
                     self.footer(ui);
                 });
@@ -1583,12 +1586,34 @@ impl App {
         });
     }
 
-    fn log_view(&self, ui: &mut egui::Ui) {
+    fn log_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if self.log.is_empty() {
             return;
         }
         ui.add_space(6.0);
+        let mut copy = false;
         ui.collapsing(tr!("Registro dettagliato", "Detailed log"), |ui| {
+            ui.horizontal(|ui| {
+                copy = ui
+                    .button(tr!("Copia tutto il registro", "Copy the whole log"))
+                    .on_hover_text(tr!(
+                        "Copia negli appunti il registro, con le versioni di Grabbit e degli strumenti",
+                        "Copy the log to the clipboard, with the versions of Grabbit and its tools"
+                    ))
+                    .clicked();
+                if let Some(t) = self.log_copied {
+                    if t.elapsed().as_secs() < 3 {
+                        ui.label(
+                            RichText::new(tr!("Copiato negli appunti ✓", "Copied to the clipboard ✓"))
+                                .small()
+                                .color(OK),
+                        );
+                        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    } else {
+                        self.log_copied = None;
+                    }
+                }
+            });
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .stick_to_bottom(true)
@@ -1598,6 +1623,31 @@ impl App {
                     }
                 });
         });
+        if copy {
+            ctx.copy_text(self.log_report());
+            self.log_copied = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Il registro intero, preceduto da versioni e sistema: pronto da incollare in una
+    /// segnalazione.
+    fn log_report(&self) -> String {
+        let yes = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
+        let mut out = format!(
+            "Grabbit {} · {} {} · yt-dlp {} · ffmpeg {} · {} {}\n\n",
+            selfupdate::CURRENT,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            self.tools.ytdlp.as_deref().unwrap_or("?"),
+            yes(self.tools.ffmpeg.is_some()),
+            self.tools.js.as_ref().map(|j| j.name()).unwrap_or("Deno"),
+            yes(self.tools.js.is_some()),
+        );
+        for l in &self.log {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out
     }
 
     fn footer(&self, ui: &mut egui::Ui) {
