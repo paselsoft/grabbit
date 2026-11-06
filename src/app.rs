@@ -109,6 +109,25 @@ enum UpdateUi {
     Failed(String),
 }
 
+/// Filtro delle uscite nella discografia di un artista.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum ReleaseFilter {
+    #[default]
+    Albums,
+    Singles,
+    All,
+}
+
+impl ReleaseFilter {
+    fn shows(self, r: &SearchResult) -> bool {
+        match self {
+            ReleaseFilter::All => true,
+            ReleaseFilter::Albums => is_album(r),
+            ReleaseFilter::Singles => !is_album(r),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SearchUi {
     query: String,
@@ -128,6 +147,8 @@ struct SearchUi {
     cancel: Arc<AtomicBool>,
     /// messaggio dopo «Aggiungi ai link»
     notice: Option<String>,
+    /// discografia di un artista: quali uscite mostrare (come i filtri di YouTube Music)
+    release_filter: ReleaseFilter,
 }
 
 #[derive(Default)]
@@ -903,12 +924,10 @@ impl App {
             let header = match (&self.search.artist, self.search.last_source) {
                 (Some(name), search::Source::MusicArtist) => tr!(
                     format!(
-                        "Discografia di {name}: {} uscite (album e singoli) · «Scarica» scarica tutto l'album {what}, con le opzioni qui sotto.",
-                        res.len()
+                        "Discografia di {name} · «Scarica» scarica tutto l'album {what}, con le opzioni qui sotto."
                     ),
                     format!(
-                        "Discography of {name}: {} releases (albums and singles) · “Download” saves the whole album {what}, with the options below.",
-                        res.len()
+                        "Discography of {name} · “Download” saves the whole album {what}, with the options below."
                     )
                 ),
                 _ => tr!(
@@ -931,16 +950,64 @@ impl App {
                     .small()
                     .color(ui.visuals().weak_text_color()),
             );
+            // discografia: filtri come quelli di YouTube Music (Album / Singoli ed EP)
+            let artist_mode = self.search.last_source == search::Source::MusicArtist;
+            if artist_mode {
+                let albums = res.iter().filter(|r| is_album(r)).count();
+                let singles = res.len() - albums;
+                ui.horizontal_wrapped(|ui| {
+                    for (f, label) in [
+                        (
+                            ReleaseFilter::Albums,
+                            tr!(format!("Album ({albums})"), format!("Albums ({albums})")),
+                        ),
+                        (
+                            ReleaseFilter::Singles,
+                            tr!(
+                                format!("Singoli ed EP ({singles})"),
+                                format!("Singles and EPs ({singles})")
+                            ),
+                        ),
+                        (
+                            ReleaseFilter::All,
+                            tr!(
+                                format!("Tutto ({})", res.len()),
+                                format!("All ({})", res.len())
+                            ),
+                        ),
+                    ] {
+                        let on = self.search.release_filter == f;
+                        let text = RichText::new(label).color(if on {
+                            ON_ACCENT
+                        } else {
+                            ui.visuals().text_color()
+                        });
+                        if ui.selectable_label(on, text).clicked() {
+                            self.search.release_filter = f;
+                        }
+                    }
+                });
+            }
+            let filter = if artist_mode {
+                self.search.release_filter
+            } else {
+                ReleaseFilter::All
+            };
             ui.add_space(2.0);
             egui::ScrollArea::vertical()
                 .id_salt("search_results")
                 .max_height(330.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    let mut shown = 0;
                     for (i, r) in self.search.results.iter().enumerate() {
-                        if i > 0 {
+                        if !filter.shows(r) {
+                            continue;
+                        }
+                        if shown > 0 {
                             ui.separator();
                         }
+                        shown += 1;
                         ui.horizontal(|ui| {
                             let sel = &mut self.search.selected[i];
                             let resp = ui.add(egui::Checkbox::without_text(sel));
@@ -1094,7 +1161,14 @@ impl App {
                     }
                 });
 
-            let n_sel = self.search.selected.iter().filter(|s| **s).count();
+            // si scaricano solo i risultati spuntati e visibili con il filtro scelto
+            let n_sel = self
+                .search
+                .results
+                .iter()
+                .zip(&self.search.selected)
+                .filter(|(r, s)| **s && filter.shows(r))
+                .count();
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 let picked = || {
@@ -1102,7 +1176,7 @@ impl App {
                         .results
                         .iter()
                         .zip(&self.search.selected)
-                        .filter(|(_, s)| **s)
+                        .filter(|(r, s)| **s && filter.shows(r))
                         .map(|(r, _)| r.url.clone())
                         .collect::<Vec<_>>()
                 };
@@ -1561,6 +1635,11 @@ impl App {
 
 /// Riquadro della copertina nei risultati della ricerca (16:9, come le miniature YouTube).
 const THUMB_SLOT: egui::Vec2 = egui::vec2(112.0, 63.0);
+
+/// È un album (e non un singolo, un EP o una playlist)?
+fn is_album(r: &SearchResult) -> bool {
+    release_kind(r).eq_ignore_ascii_case("album")
+}
 
 /// «Album», «Singolo» o «Playlist» per un risultato che raccoglie più brani.
 fn release_kind(r: &SearchResult) -> String {
