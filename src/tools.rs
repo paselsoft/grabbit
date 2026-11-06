@@ -2,6 +2,7 @@
 //! Gestione degli strumenti esterni: yt-dlp, Deno (runtime JS richiesto da
 //! yt-dlp per YouTube) e ffmpeg. Vengono scaricati nella cartella dati
 //! dell'app e tenuti aggiornati automaticamente.
+use crate::downloader::JsRuntime;
 use crate::net;
 use crate::tr;
 use anyhow::{anyhow, bail, Context, Result};
@@ -286,6 +287,68 @@ fn check_deno(dest: PathBuf) -> Result<PathBuf> {
             "Deno non funziona su questa versione del sistema operativo",
             "Deno does not work on this operating system version"
         ))
+    }
+}
+
+// ───────────────────────────── QuickJS ─────────────────────────────
+
+/// Runtime JavaScript per yt-dlp: Deno; sui Mac dove Deno non parte (le sue versioni
+/// richiedono un macOS recente) si ripiega su QuickJS, più lento ma leggero.
+pub fn ensure_js_runtime(status: &mut dyn FnMut(String)) -> Result<JsRuntime> {
+    match ensure_deno(status) {
+        Ok(p) => Ok(JsRuntime::deno(p)),
+        Err(e) if cfg!(target_os = "macos") => ensure_quickjs(status)
+            .map(JsRuntime::quickjs)
+            .map_err(|q| anyhow!("{e:#}; QuickJS: {q:#}")),
+        Err(e) => Err(e),
+    }
+}
+
+/// QuickJS-ng nella versione universale (Cosmopolitan, «APE»): gira anche su macOS
+/// vecchi come High Sierra, dove la versione per Mac non parte. Un file APE però non
+/// si avvia direttamente: va passato a `sh`. Per questo yt-dlp riceve un piccolo
+/// script (`qjs`) che lo avvia nel modo giusto.
+const QUICKJS_URL: &str =
+    "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-cosmo.com";
+
+const QUICKJS_LAUNCHER: &str = r#"#!/bin/sh
+# Avvia QuickJS (versione universale Cosmopolitan) per yt-dlp: creato da Grabbit.
+q="$(dirname "$0")/qjs.com"
+case "$(head -c 2 "$q")" in
+  MZ) exec /bin/sh "$q" "$@" ;;
+  *) exec "$q" "$@" ;;
+esac
+"#;
+
+pub fn ensure_quickjs(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
+    let dir = bin_dir();
+    let com = dir.join("qjs.com");
+    let launcher = dir.join("qjs");
+    if !com.exists() {
+        net::download(QUICKJS_URL, &com, &mut |d, t| {
+            status(tr!(
+                format!("Scarico il runtime JavaScript (QuickJS)… {}", pct(d, t)),
+                format!(
+                    "Downloading the JavaScript runtime (QuickJS)… {}",
+                    pct(d, t)
+                )
+            ))
+        })?;
+        make_executable(&com)?;
+    }
+    if fs::read_to_string(&launcher).ok().as_deref() != Some(QUICKJS_LAUNCHER) {
+        fs::write(&launcher, QUICKJS_LAUNCHER)?;
+    }
+    make_executable(&launcher)?;
+    let runs = command(&launcher)
+        .args(["-e", "0"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if runs {
+        Ok(launcher)
+    } else {
+        bail!(tr!("QuickJS non si avvia", "QuickJS does not start"))
     }
 }
 

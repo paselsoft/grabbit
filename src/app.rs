@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Interfaccia grafica (egui).
 use crate::config::{Config, Mode};
-use crate::downloader::{self, Emit, Event, Toolset};
+use crate::downloader::{self, Emit, Event, JsRuntime, Toolset};
 use crate::search::{self, SearchResult};
 use crate::selfupdate::{self, Release};
 use crate::tools;
@@ -57,7 +57,7 @@ enum Msg {
     ToolsReady {
         ytdlp: String,
         ffmpeg: Option<PathBuf>,
-        deno: Option<PathBuf>,
+        js: Option<JsRuntime>,
         warnings: Vec<String>,
     },
     ToolsFailed(String),
@@ -132,7 +132,7 @@ struct SearchUi {
 struct ToolsUi {
     ytdlp: Option<String>,
     ffmpeg: Option<PathBuf>,
-    deno: Option<PathBuf>,
+    js: Option<JsRuntime>,
     status: String,
     error: Option<String>,
     warnings: Vec<String>,
@@ -219,8 +219,8 @@ impl App {
                 }
             };
             let mut warnings = Vec::new();
-            let deno = tools::ensure_deno(&mut status)
-                .map_err(|e| warnings.push(tr!(format!("Deno non disponibile ({e:#}): alcuni video YouTube potrebbero non funzionare."), format!("Deno is not available ({e:#}): some YouTube videos may not work."))))
+            let js = tools::ensure_js_runtime(&mut status)
+                .map_err(|e| warnings.push(tr!(format!("Runtime JavaScript (Deno) non disponibile ({e:#}): alcuni video YouTube potrebbero non funzionare."), format!("JavaScript runtime (Deno) is not available ({e:#}): some YouTube videos may not work."))))
                 .ok();
             let ffmpeg = tools::ensure_ffmpeg(&mut status)
                 .map_err(|e| warnings.push(tr!(format!("ffmpeg non disponibile ({e:#}): serve per la conversione audio e l'unione video/audio. Installalo e riavvia."), format!("ffmpeg is not available ({e:#}): it is needed for audio conversion and merging video/audio. Install it and restart."))))
@@ -228,7 +228,7 @@ impl App {
             send(Msg::ToolsReady {
                 ytdlp,
                 ffmpeg,
-                deno,
+                js,
                 warnings,
             });
         });
@@ -294,7 +294,7 @@ impl App {
         Toolset {
             ytdlp: tools::ytdlp_path(),
             ffmpeg_dir: self.tools.ffmpeg.clone(),
-            deno: self.tools.deno.clone(),
+            js: self.tools.js.clone(),
         }
     }
 
@@ -428,13 +428,13 @@ impl App {
             Msg::ToolsReady {
                 ytdlp,
                 ffmpeg,
-                deno,
+                js,
                 warnings,
             } => {
                 self.tools.busy = false;
                 self.tools.ytdlp = Some(ytdlp);
                 self.tools.ffmpeg = ffmpeg;
-                self.tools.deno = deno;
+                self.tools.js = js;
                 self.tools.warnings = warnings;
             }
             Msg::ToolsFailed(e) => {
@@ -1518,11 +1518,12 @@ impl App {
         let ok = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
         ui.label(
             RichText::new(format!(
-                "Grabbit {} · yt-dlp {} · ffmpeg {} · Deno {}",
+                "Grabbit {} · yt-dlp {} · ffmpeg {} · {} {}",
                 selfupdate::CURRENT,
                 yt,
                 ok(self.tools.ffmpeg.is_some()),
-                ok(self.tools.deno.is_some()),
+                self.tools.js.as_ref().map(|j| j.name()).unwrap_or("Deno"),
+                ok(self.tools.js.is_some()),
             ))
             .small()
             .color(ui.visuals().weak_text_color()),

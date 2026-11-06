@@ -118,9 +118,9 @@ pub fn build_args(
     .iter()
     .map(|s| s.to_string())
     .collect();
-    if let Some(d) = &tools.deno {
+    if let Some(js) = &tools.js {
         a.push("--js-runtimes".into());
-        a.push(format!("deno:{}", d.to_string_lossy()));
+        a.push(js.arg());
     }
     if !cookies_browser.is_empty() {
         a.push("--cookies-from-browser".into());
@@ -372,9 +372,9 @@ pub fn details_args(url: &str, tools: &Toolset, cookies_browser: &str) -> Vec<St
     .iter()
     .map(|s| s.to_string())
     .collect();
-    if let Some(d) = &tools.deno {
+    if let Some(js) = &tools.js {
         a.push("--js-runtimes".into());
-        a.push(format!("deno:{}", d.to_string_lossy()));
+        a.push(js.arg());
     }
     if !cookies_browser.is_empty() {
         a.push("--cookies-from-browser".into());
@@ -484,7 +484,7 @@ mod tests {
         Toolset {
             ytdlp: "yt-dlp".into(),
             ffmpeg_dir: None,
-            deno: Some("/dn/deno".into()),
+            js: Some(crate::downloader::JsRuntime::deno("/dn/deno".into())),
         }
     }
 

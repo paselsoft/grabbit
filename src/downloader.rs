@@ -23,11 +23,47 @@ pub enum Event {
 
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// Runtime JavaScript che yt-dlp usa per risolvere le «sfide» di YouTube:
+/// Deno di solito, QuickJS sui Mac dove Deno non parte (macOS troppo vecchi).
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsRuntime {
+    /// nome per l'opzione `--js-runtimes` di yt-dlp: "deno" o "quickjs"
+    pub kind: &'static str,
+    pub path: PathBuf,
+}
+
+impl JsRuntime {
+    pub fn deno(path: PathBuf) -> Self {
+        Self { kind: "deno", path }
+    }
+
+    pub fn quickjs(path: PathBuf) -> Self {
+        Self {
+            kind: "quickjs",
+            path,
+        }
+    }
+
+    /// Valore per `--js-runtimes`, es. `deno:/percorso/deno`.
+    pub fn arg(&self) -> String {
+        format!("{}:{}", self.kind, self.path.to_string_lossy())
+    }
+
+    /// Nome da mostrare nell'interfaccia.
+    pub fn name(&self) -> &'static str {
+        if self.kind == "quickjs" {
+            "QuickJS"
+        } else {
+            "Deno"
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Toolset {
     pub ytdlp: PathBuf,
     pub ffmpeg_dir: Option<PathBuf>,
-    pub deno: Option<PathBuf>,
+    pub js: Option<JsRuntime>,
 }
 
 struct Job {
@@ -223,11 +259,8 @@ fn probe_playlist_title(
         }
         .into(),
     );
-    if let Some(d) = &tools.deno {
-        add(
-            &mut a,
-            &["--js-runtimes", &format!("deno:{}", d.to_string_lossy())],
-        );
+    if let Some(js) = &tools.js {
+        add(&mut a, &["--js-runtimes", &js.arg()]);
     }
     if !cfg.cookies_browser.is_empty() {
         add(&mut a, &["--cookies-from-browser", &cfg.cookies_browser]);
@@ -369,11 +402,8 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     if let Some(d) = &tools.ffmpeg_dir {
         add(&mut a, &["--ffmpeg-location", &d.to_string_lossy()]);
     }
-    if let Some(d) = &tools.deno {
-        add(
-            &mut a,
-            &["--js-runtimes", &format!("deno:{}", d.to_string_lossy())],
-        );
+    if let Some(js) = &tools.js {
+        add(&mut a, &["--js-runtimes", &js.arg()]);
     }
     if !cfg.cookies_browser.is_empty() {
         add(&mut a, &["--cookies-from-browser", &cfg.cookies_browser]);
@@ -617,7 +647,7 @@ mod tests {
         Toolset {
             ytdlp: "yt-dlp".into(),
             ffmpeg_dir: Some("/ff".into()),
-            deno: Some("/dn/deno".into()),
+            js: Some(JsRuntime::deno("/dn/deno".into())),
         }
     }
 
@@ -760,7 +790,7 @@ mod tests {
         let tools = Toolset {
             ytdlp: bin.into(),
             ffmpeg_dir: None,
-            deno: None,
+            js: None,
         };
         let emit: Emit = Arc::new(|e| {
             if let Event::Log(l) = e {
@@ -865,7 +895,7 @@ mod tests {
         let tools = Toolset {
             ytdlp: bin.into(),
             ffmpeg_dir: None,
-            deno: None,
+            js: None,
         };
         let events = Arc::new(Mutex::new(Vec::<String>::new()));
         let ev = events.clone();
