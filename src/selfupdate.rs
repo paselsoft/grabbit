@@ -74,12 +74,59 @@ pub fn asset_name() -> Option<String> {
     })
 }
 
-/// Su Linux l'aggiornamento in-place funziona solo da AppImage.
+/// Su Linux l'aggiornamento in-place funziona solo da AppImage; su macOS non funziona
+/// quando il sistema avvia l'app da una copia in sola lettura (App Translocation).
 pub fn supported() -> bool {
     if cfg!(target_os = "linux") {
         std::env::var_os("APPIMAGE").is_some()
     } else {
-        true
+        !is_translocated()
+    }
+}
+
+/// macOS «App Translocation»: un'app scaricata da Internet e aperta senza averla spostata
+/// con il Finder (ad esempio in Applicazioni) viene avviata da una copia in sola lettura in
+/// una cartella nascosta (…/AppTranslocation/…). Da lì non può sostituire sé stessa.
+pub fn is_translocated() -> bool {
+    cfg!(target_os = "macos")
+        && std::env::current_exe()
+            .map(|p| path_is_translocated(&p.to_string_lossy()))
+            .unwrap_or(false)
+}
+
+fn path_is_translocated(path: &str) -> bool {
+    path.contains("/AppTranslocation/")
+}
+
+/// Perché l'aggiornamento automatico non è possibile su questo sistema (se non lo è).
+pub fn unsupported_reason() -> String {
+    if cfg!(target_os = "linux") {
+        tr!(
+            "Per aggiornarsi da sola, l'app va avviata dal file AppImage.",
+            "To update itself, the app must be run from the AppImage file."
+        )
+        .into()
+    } else {
+        translocation_hint()
+    }
+}
+
+/// Cosa fare quando macOS avvia Grabbit dalla copia in sola lettura.
+pub fn translocation_hint() -> String {
+    tr!(
+        "macOS sta avviando Grabbit da una copia in sola lettura, quindi non può aggiornarsi da solo. Chiudi Grabbit, spostalo con il Finder nella cartella Applicazioni, nel Terminale scrivi «xattr -dr com.apple.quarantine /Applications/Grabbit.app» e riaprilo da Applicazioni.",
+        "macOS is running Grabbit from a read-only copy, so it cannot update itself. Quit Grabbit, move it with the Finder into the Applications folder, run “xattr -dr com.apple.quarantine /Applications/Grabbit.app” in Terminal and open it again from Applications."
+    )
+    .into()
+}
+
+/// Messaggio per un aggiornamento non riuscito, con il rimedio quando è noto.
+pub fn describe_apply_error(e: &str) -> String {
+    let read_only = e.contains("Read-only file system") || e.contains("os error 30");
+    if read_only && (path_is_translocated(e) || cfg!(target_os = "macos")) {
+        format!("{e}\n\n{}", translocation_hint())
+    } else {
+        e.to_string()
     }
 }
 
@@ -298,6 +345,24 @@ mod tests {
         let v = json!({"tag_name": "v2.0.0", "assets": []});
         let r = parse_release(&v, "0.1.0").unwrap().unwrap();
         assert!(r.asset_url.is_none());
+    }
+
+    #[test]
+    fn recognises_macos_app_translocation() {
+        assert!(path_is_translocated(
+            "/private/var/folders/rn/x/T/AppTranslocation/1B47BC18/d/Grabbit.app/Contents/MacOS/grabbit"
+        ));
+        assert!(!path_is_translocated(
+            "/Applications/Grabbit.app/Contents/MacOS/grabbit"
+        ));
+        let msg = describe_apply_error(
+            "Read-only file system (os error 30) at path \"/private/var/folders/rn/x/T/AppTranslocation/1B/d/Grabbit.app/Contents/MacOS/.grabbit\"",
+        );
+        assert!(msg.contains("com.apple.quarantine"), "{msg}");
+        assert_eq!(
+            describe_apply_error("rete non raggiungibile"),
+            "rete non raggiungibile"
+        );
     }
 
     #[test]

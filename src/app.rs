@@ -538,7 +538,9 @@ impl App {
                     .into(),
                 )
             }
-            Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
+            Msg::UpdateDone(Err(e)) => {
+                self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
+            }
             Msg::Folder(p) => self.cfg.out_dir = p,
             Msg::PlayerDir(p) => {
                 self.cfg.player_dir = Some(p);
@@ -761,12 +763,9 @@ impl App {
                         );
                     } else if !selfupdate::supported() {
                         ui.label(
-                            RichText::new(tr!(
-                                "Per aggiornarsi da sola, l'app va avviata dal file AppImage.",
-                                "To update itself, the app must be run from the AppImage file."
-                            ))
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
+                            RichText::new(selfupdate::unsupported_reason())
+                                .small()
+                                .color(WARN),
                         );
                     }
                     let notes = rel.notes.trim();
