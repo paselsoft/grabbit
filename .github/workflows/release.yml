@@ -42,7 +42,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       publish: ${{ steps.meta.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # serve per vedere i tag già esistenti
       - id: meta
@@ -93,7 +93,7 @@ jobs:
     needs: prepare
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -102,7 +102,7 @@ jobs:
       - name: Rinomina l'eseguibile
         shell: bash
         run: cp target/release/grabbit.exe grabbit-windows-x86_64.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows
           path: grabbit-windows-x86_64.exe
@@ -114,19 +114,20 @@ jobs:
     needs: prepare
     runs-on: ubuntu-22.04 # glibc "vecchia" = l'AppImage gira anche su distro non recenti
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # il player audio usa ALSA: servono le sue intestazioni per compilare
+      # il player audio usa ALSA: servono le sue intestazioni per compilare;
+      # appstream: appimagetool controlla con appstreamcli la descrizione dell'app
       - name: Librerie di sistema
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev appstream
       # "bash" davanti allo script: caricando da zip o da Windows il file perde il
       # permesso di esecuzione e GitHub darebbe "exit code 126".
       - name: Costruisci l'AppImage
         run: ARCH=x86_64 bash packaging/linux/build-appimage.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-x86_64
           path: target/appimage/grabbit-linux-x86_64.AppImage
@@ -142,16 +143,16 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Librerie di sistema
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev appstream
       - name: Costruisci l'AppImage
         run: ARCH=aarch64 bash packaging/linux/build-appimage.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-aarch64
           path: target/appimage/grabbit-linux-aarch64.AppImage
@@ -163,7 +164,7 @@ jobs:
     needs: prepare
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -207,7 +208,7 @@ jobs:
           PLIST
             ditto -c -k --keepParent "$APP" "dist/Grabbit-macos-$ARCH.app.zip"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos
           path: dist/*
@@ -222,7 +223,7 @@ jobs:
     if: ${{ always() && needs.prepare.outputs.publish == 'true' && needs.windows.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: release
           merge-multiple: true
