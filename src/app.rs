@@ -2,6 +2,7 @@
 //! Interfaccia grafica (egui).
 use crate::config::{Config, Mode};
 use crate::downloader::{self, Emit, Event, JsRuntime, Toolset};
+use crate::player;
 use crate::search::{self, SearchResult};
 use crate::selfupdate::{self, Release};
 use crate::tools;
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 // Tema scuro con accento arancione.
 const ACCENT: Color32 = Color32::from_rgb(249, 115, 22);
@@ -65,6 +67,13 @@ enum Msg {
     UpdateStatus(String),
     UpdateDone(Result<(), String>),
     Folder(PathBuf),
+    /// cartella della musica scelta per «Ascolta»
+    PlayerDir(PathBuf),
+    /// libreria musicale letta (`seq` scarta le letture superate)
+    Library {
+        seq: u64,
+        library: player::Library,
+    },
     Dl(Event),
     /// esito di una ricerca; `seq` scarta le risposte di ricerche ormai superate
     SearchDone {
@@ -185,6 +194,9 @@ pub struct App {
     logo: egui::TextureHandle,
     /// quando è stato copiato il registro (per mostrare «Copiato» per qualche secondo)
     log_copied: Option<std::time::Instant>,
+    tab: Tab,
+    listen: ListenUi,
+    engine: player::Engine,
 }
 
 impl App {
@@ -211,6 +223,12 @@ impl App {
             update_auto: false,
             logo,
             log_copied: None,
+            tab: Tab::default(),
+            listen: ListenUi::default(),
+            engine: {
+                let ctx = cc.egui_ctx.clone();
+                player::Engine::start(move || ctx.request_repaint())
+            },
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -522,6 +540,17 @@ impl App {
             }
             Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::PlayerDir(p) => {
+                self.cfg.player_dir = Some(p);
+                self.cfg.save();
+                self.listen.open = None;
+                self.start_scan(ctx);
+            }
+            Msg::Library { seq, library } => {
+                if seq == self.listen.seq {
+                    self.library_arrived(ctx, library);
+                }
+            }
             Msg::Details { seq, idx, details } => {
                 if seq == self.search.seq {
                     if let Some(r) = self.search.results.get_mut(idx) {
@@ -604,7 +633,11 @@ impl App {
                         j.detail = detail;
                     }
                 }
-                Event::Finished => self.running = false,
+                Event::Finished => {
+                    self.running = false;
+                    // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
+                    self.listen.stale = true;
+                }
             },
         }
     }
@@ -615,31 +648,41 @@ impl eframe::App for App {
         while let Ok(m) = self.rx.try_recv() {
             self.handle(m, ctx);
         }
+        self.player_tick(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        // il brano in ascolto resta in basso in tutte e due le schede
+        self.now_playing_bar(ui);
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
                     ui.set_max_width(ui.available_width());
                     self.header(ui);
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
+                    self.tab_bar(ui, ctx);
+                    ui.add_space(6.0);
                     self.update_banner(ui, ctx);
-                    self.tools_banner(ui, ctx);
-                    ui.add_space(4.0);
-                    self.search_card(ui, ctx);
-                    ui.add_space(8.0);
-                    self.link_card(ui);
-                    ui.add_space(8.0);
-                    self.options_card(ui, ctx);
-                    ui.add_space(10.0);
-                    self.action_row(ui, ctx);
-                    ui.add_space(10.0);
-                    self.queue(ui);
-                    self.log_view(ui, ctx);
+                    match self.tab {
+                        Tab::Download => {
+                            self.tools_banner(ui, ctx);
+                            ui.add_space(4.0);
+                            self.search_card(ui, ctx);
+                            ui.add_space(8.0);
+                            self.link_card(ui);
+                            ui.add_space(8.0);
+                            self.options_card(ui, ctx);
+                            ui.add_space(10.0);
+                            self.action_row(ui, ctx);
+                            ui.add_space(10.0);
+                            self.queue(ui);
+                            self.log_view(ui, ctx);
+                        }
+                        Tab::Listen => self.listen_view(ui, ctx),
+                    }
                     ui.add_space(6.0);
                     self.footer(ui);
                 });
@@ -1710,6 +1753,702 @@ impl App {
         );
     }
 }
+
+// ───────────────────────────── Ascolta (player) ─────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Tab {
+    #[default]
+    Download,
+    Listen,
+}
+
+#[derive(Default)]
+struct ListenUi {
+    library: Option<player::Library>,
+    busy: bool,
+    seq: u64,
+    cancel: Arc<AtomicBool>,
+    /// la cartella è cambiata dall'ultima lettura (nuovi download): va riletta
+    stale: bool,
+    covers: Vec<Option<egui::TextureHandle>>,
+    /// album aperto (indice in `library.albums`)
+    open: Option<usize>,
+    /// brano in riproduzione: (album, brano)
+    now: Option<(usize, usize)>,
+    last_ended: u64,
+    /// posizione trascinata sulla barra, finché non si rilascia
+    seek_drag: Option<f32>,
+}
+
+/// Icone dei pulsanti del player, disegnate (i caratteri ▶ ⏸ non ci sono nei font di serie).
+#[derive(Clone, Copy)]
+enum Icon {
+    Play,
+    Pause,
+    Prev,
+    Next,
+}
+
+/// Pulsante con un'icona disegnata; `label` è il nome letto dal lettore di schermo.
+fn icon_button(ui: &mut egui::Ui, icon: Icon, label: &str, big: bool) -> egui::Response {
+    let side = if big { 40.0 } else { 32.0 };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let resp = resp.on_hover_text(label);
+    let visuals = ui.style().interact(&resp);
+    let (fill, fg) = if big {
+        (ACCENT, ON_ACCENT)
+    } else {
+        (visuals.weak_bg_fill, visuals.fg_stroke.color)
+    };
+    ui.painter()
+        .circle(rect.center(), side / 2.0, fill, visuals.bg_stroke);
+    let c = rect.center();
+    let s = side * 0.22;
+    let p = ui.painter();
+    let tri = |dir: f32, x: f32| {
+        // triangolo che punta a destra (dir = 1) o a sinistra (dir = -1), centrato in x
+        vec![
+            egui::pos2(x - dir * s * 0.8, c.y - s),
+            egui::pos2(x - dir * s * 0.8, c.y + s),
+            egui::pos2(x + dir * s * 0.9, c.y),
+        ]
+    };
+    let shape = |pts: Vec<egui::Pos2>| egui::Shape::convex_polygon(pts, fg, egui::Stroke::NONE);
+    match icon {
+        Icon::Play => {
+            p.add(shape(tri(1.0, c.x + s * 0.15)));
+        }
+        Icon::Pause => {
+            for dx in [-s * 0.55, s * 0.55] {
+                p.rect_filled(
+                    egui::Rect::from_center_size(
+                        egui::pos2(c.x + dx, c.y),
+                        egui::vec2(s * 0.5, s * 2.0),
+                    ),
+                    1,
+                    fg,
+                );
+            }
+        }
+        Icon::Prev | Icon::Next => {
+            let dir = if matches!(icon, Icon::Next) {
+                1.0
+            } else {
+                -1.0
+            };
+            p.add(shape(tri(dir, c.x - dir * s * 0.25)));
+            p.rect_filled(
+                egui::Rect::from_center_size(
+                    egui::pos2(c.x + dir * s * 0.95, c.y),
+                    egui::vec2(s * 0.35, s * 2.0),
+                ),
+                1,
+                fg,
+            );
+        }
+    }
+    resp
+}
+
+/// Riquadro della copertina (o grigio con una nota disegnata, se manca).
+fn cover_box(ui: &mut egui::Ui, tex: Option<&egui::TextureHandle>, side: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    match tex {
+        Some(t) => {
+            egui::Image::new((t.id(), egui::vec2(side, side)))
+                .corner_radius(6)
+                .paint_at(ui, rect);
+        }
+        None => {
+            ui.painter()
+                .rect_filled(rect, 6, Color32::from_rgb(36, 36, 40));
+            // una croma stilizzata
+            let c = rect.center();
+            let r = side * 0.12;
+            let col = Color32::from_rgb(90, 90, 98);
+            ui.painter()
+                .circle_filled(egui::pos2(c.x - r * 0.6, c.y + r * 1.4), r, col);
+            ui.painter().line_segment(
+                [
+                    egui::pos2(c.x - r * 0.6 + r * 0.9, c.y + r * 1.4),
+                    egui::pos2(c.x - r * 0.6 + r * 0.9, c.y - r * 2.2),
+                ],
+                egui::Stroke::new((r * 0.35).max(1.5), col),
+            );
+        }
+    }
+    resp
+}
+
+impl App {
+    fn listen_dir(&self) -> PathBuf {
+        self.cfg
+            .player_dir
+            .clone()
+            .unwrap_or_else(|| self.cfg.out_dir.clone())
+    }
+
+    /// Rilegge la cartella della musica (in un thread a parte).
+    fn start_scan(&mut self, ctx: &egui::Context) {
+        self.listen.cancel.store(true, Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.listen.cancel = cancel.clone();
+        self.listen.seq += 1;
+        self.listen.busy = true;
+        self.listen.stale = false;
+        let seq = self.listen.seq;
+        let dir = self.listen_dir();
+        let px = (COVER_LIST * ctx.pixels_per_point().max(1.0)).round() as u32 * 2;
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let library = player::scan(&dir, px, &cancel);
+            send(Msg::Library { seq, library });
+        });
+    }
+
+    fn pick_player_dir(&self, ctx: &egui::Context) {
+        let send = self.sender(ctx);
+        let start = self.listen_dir();
+        thread::spawn(move || {
+            if let Some(p) = rfd::FileDialog::new()
+                .set_title(tr!(
+                    "Scegli la cartella della musica",
+                    "Choose the music folder"
+                ))
+                .set_directory(start)
+                .pick_folder()
+            {
+                send(Msg::PlayerDir(p));
+            }
+        });
+    }
+
+    fn library_arrived(&mut self, ctx: &egui::Context, library: player::Library) {
+        // il brano in riproduzione può aver cambiato posto: lo si ritrova dal percorso
+        let playing = self.now_track().map(|t| t.path.clone());
+        self.listen.covers = library
+            .albums
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                a.cover.as_ref().map(|(w, h, rgba)| {
+                    ctx.load_texture(
+                        format!("cover-{}-{i}", self.listen.seq),
+                        egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+            })
+            .collect();
+        self.listen.now =
+            playing.and_then(|p| {
+                library.albums.iter().enumerate().find_map(|(ai, a)| {
+                    a.tracks.iter().position(|t| t.path == p).map(|ti| (ai, ti))
+                })
+            });
+        if self.listen.open.is_some_and(|i| i >= library.albums.len()) {
+            self.listen.open = None;
+        }
+        self.listen.library = Some(library);
+        self.listen.busy = false;
+    }
+
+    fn now_track(&self) -> Option<&player::Track> {
+        let (a, t) = self.listen.now?;
+        self.listen.library.as_ref()?.albums.get(a)?.tracks.get(t)
+    }
+
+    fn play_at(&mut self, album: usize, track: usize) {
+        let Some(t) = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(album))
+            .and_then(|a| a.tracks.get(track))
+        else {
+            return;
+        };
+        self.engine.set_volume(self.cfg.volume);
+        self.engine.play(&t.path);
+        self.listen.now = Some((album, track));
+        self.listen.seek_drag = None;
+    }
+
+    fn play_next(&mut self) {
+        let Some((a, t)) = self.listen.now else {
+            return;
+        };
+        let len = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(a))
+            .map_or(0, |al| al.tracks.len());
+        if t + 1 < len {
+            self.play_at(a, t + 1);
+        } else {
+            // fine dell'album
+            self.engine.stop();
+            self.listen.now = None;
+        }
+    }
+
+    fn play_prev(&mut self) {
+        let Some((a, t)) = self.listen.now else {
+            return;
+        };
+        // come nei lettori musicali: dopo i primi secondi «indietro» riparte dall'inizio
+        if self.engine.status().pos > Duration::from_secs(3) || t == 0 {
+            self.engine.seek(Duration::ZERO);
+        } else {
+            self.play_at(a, t - 1);
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        let st = self.engine.status();
+        if st.loaded {
+            if st.paused {
+                self.engine.resume();
+            } else {
+                self.engine.pause();
+            }
+        } else if let Some((a, t)) = self.listen.now {
+            self.play_at(a, t);
+        }
+    }
+
+    /// Da chiamare a ogni fotogramma: passa al brano successivo quando uno finisce.
+    fn player_tick(&mut self, ctx: &egui::Context) {
+        let st = self.engine.status();
+        if st.ended != self.listen.last_ended {
+            self.listen.last_ended = st.ended;
+            if self.listen.now.is_some() {
+                self.play_next();
+            }
+        }
+        // mentre suona (o sta per partire) la barra avanza da sola, senza aspettare il mouse
+        if self.listen.now.is_some() && !st.paused {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            for (tab, label) in [
+                (Tab::Download, tr!("  Scarica  ", "  Download  ")),
+                (Tab::Listen, tr!("  Ascolta  ", "  Listen  ")),
+            ] {
+                let on = self.tab == tab;
+                let text = RichText::new(label).size(17.0).strong().color(if on {
+                    ON_ACCENT
+                } else {
+                    ui.visuals().text_color()
+                });
+                if ui.selectable_label(on, text).clicked() && !on {
+                    self.tab = tab;
+                    if tab == Tab::Listen
+                        && (self.listen.library.is_none() || self.listen.stale)
+                        && !self.listen.busy
+                    {
+                        self.start_scan(ctx);
+                    }
+                }
+            }
+        });
+    }
+
+    fn listen_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut rescan = false;
+        let mut play: Option<(usize, usize)> = None;
+        let mut open: Option<Option<usize>> = None;
+        card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(tr!("Musica in", "Music in")).strong());
+                if ui.button(tr!("Sfoglia…", "Browse…")).clicked() {
+                    self.pick_player_dir(ctx);
+                }
+                if ui
+                    .add_enabled(
+                        !self.listen.busy,
+                        egui::Button::new(tr!("Aggiorna", "Refresh")),
+                    )
+                    .on_hover_text(tr!(
+                        "Rilegge la cartella (per i brani scaricati nel frattempo)",
+                        "Reads the folder again (for tracks downloaded in the meantime)"
+                    ))
+                    .clicked()
+                {
+                    rescan = true;
+                }
+                ui.label(
+                    RichText::new(self.listen_dir().to_string_lossy())
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
+            if self.listen.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(tr!("Leggo la cartella…", "Reading the folder…"));
+                });
+            }
+            let Some(lib) = &self.listen.library else {
+                return;
+            };
+            if lib.albums.is_empty() && !self.listen.busy {
+                ui.label(tr!(
+                    "Nessun brano riproducibile in questa cartella (MP3, M4A, FLAC, WAV, OGG).",
+                    "No playable tracks in this folder (MP3, M4A, FLAC, WAV, OGG)."
+                ));
+            }
+            if lib.unsupported > 0 {
+                ui.label(
+                    RichText::new(tr!(
+                        format!("{} file Opus/WebM non si possono ascoltare qui: per la musica scegli M4A o MP3.", lib.unsupported),
+                        format!("{} Opus/WebM files cannot be played here: for music choose M4A or MP3.", lib.unsupported)
+                    ))
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+                );
+            }
+            ui.add_space(4.0);
+            match self.listen.open.filter(|i| *i < lib.albums.len()) {
+                None => {
+                    // elenco degli album
+                    for (i, a) in lib.albums.iter().enumerate() {
+                        let row = ui
+                            .horizontal(|ui| {
+                                cover_box(
+                                    ui,
+                                    self.listen.covers.get(i).and_then(|c| c.as_ref()),
+                                    COVER_LIST,
+                                );
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&a.name).strong())
+                                            .truncate(),
+                                    );
+                                    let total: Duration =
+                                        a.tracks.iter().filter_map(|t| t.duration).sum();
+                                    let mut meta = Vec::new();
+                                    if !a.artist.is_empty() {
+                                        meta.push(a.artist.clone());
+                                    }
+                                    meta.push(tracks_label(a.tracks.len()));
+                                    if !total.is_zero() {
+                                        meta.push(player::fmt_time(total));
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(meta.join(" · "))
+                                                .small()
+                                                .color(ui.visuals().weak_text_color()),
+                                        )
+                                        .truncate(),
+                                    );
+                                    if self.listen.now.is_some_and(|(na, _)| na == i) {
+                                        ui.label(
+                                            RichText::new(tr!("in ascolto", "now playing"))
+                                                .small()
+                                                .color(ACCENT),
+                                        );
+                                    }
+                                });
+                            })
+                            .response;
+                        let resp = ui
+                            .interact(
+                                row.rect,
+                                ui.scope_id().with(("album", i)),
+                                egui::Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                format!("{} ({})", a.name, a.artist),
+                            )
+                        });
+                        if resp.hovered() {
+                            ui.painter().rect_stroke(
+                                row.rect.expand(3.0),
+                                6,
+                                egui::Stroke::new(1.0, ACCENT_LIGHT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if resp.clicked() {
+                            open = Some(Some(i));
+                        }
+                        ui.add_space(4.0);
+                    }
+                }
+                Some(ai) => {
+                    // un album: copertina, dati e brani
+                    let a = &lib.albums[ai];
+                    if ui.button(tr!("Tutti gli album", "All albums")).clicked() {
+                        open = Some(None);
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        cover_box(
+                            ui,
+                            self.listen.covers.get(ai).and_then(|c| c.as_ref()),
+                            COVER_BIG,
+                        );
+                        ui.vertical(|ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(&a.name).size(20.0).strong()).wrap(),
+                            );
+                            if !a.artist.is_empty() {
+                                ui.label(&a.artist);
+                            }
+                            ui.label(
+                                RichText::new(tracks_label(a.tracks.len()))
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            ui.add_space(4.0);
+                            let btn = egui::Button::new(
+                                RichText::new(tr!("Ascolta l'album", "Play the album"))
+                                    .strong()
+                                    .color(ON_ACCENT),
+                            )
+                            .fill(ACCENT);
+                            if ui.add(btn).clicked() {
+                                play = Some((ai, 0));
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    for (ti, t) in a.tracks.iter().enumerate() {
+                        let current = self.listen.now == Some((ai, ti));
+                        let color = if current {
+                            ACCENT_LIGHT
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        let row = ui
+                            .horizontal(|ui| {
+                                ui.add_sized(
+                                    [28.0, 20.0],
+                                    egui::Label::new(
+                                        RichText::new(
+                                            t.number.map(|n| n.to_string()).unwrap_or_default(),
+                                        )
+                                        .color(ui.visuals().weak_text_color()),
+                                    ),
+                                );
+                                let dur = t.duration.map(player::fmt_time).unwrap_or_default();
+                                let w = (ui.available_width() - 60.0).max(60.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(w, 20.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(w);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&t.title).color(color).strong(),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                                ui.label(RichText::new(dur).color(ui.visuals().weak_text_color()));
+                            })
+                            .response;
+                        let resp = ui
+                            .interact(
+                                row.rect,
+                                ui.scope_id().with(("track", ai, ti)),
+                                egui::Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                tr!(format!("Ascolta {}", t.title), format!("Play {}", t.title)),
+                            )
+                        });
+                        if resp.hovered() || current {
+                            ui.painter().rect_stroke(
+                                row.rect.expand(2.0),
+                                4,
+                                egui::Stroke::new(1.0, if current { ACCENT } else { ACCENT_LIGHT }),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        if resp.clicked() {
+                            play = Some((ai, ti));
+                        }
+                    }
+                }
+            }
+        });
+        if rescan {
+            self.start_scan(ctx);
+        }
+        if let Some(o) = open {
+            self.listen.open = o;
+        }
+        if let Some((a, t)) = play {
+            self.play_at(a, t);
+            ctx.request_repaint();
+        }
+    }
+
+    /// Barra in basso con il brano in ascolto: comandi, posizione e volume.
+    fn now_playing_bar(&mut self, ui: &mut egui::Ui) {
+        let Some((ai, _)) = self.listen.now else {
+            return;
+        };
+        let Some(track) = self.now_track().cloned() else {
+            return;
+        };
+        let album = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(ai))
+            .map(|a| (a.name.clone(), a.artist.clone()))
+            .unwrap_or_default();
+        let st = self.engine.status();
+        let mut action: Option<Icon> = None;
+        egui::Panel::bottom("now_playing")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(28, 28, 31))
+                    .inner_margin(10)
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(52, 52, 57))),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    cover_box(
+                        ui,
+                        self.listen.covers.get(ai).and_then(|c| c.as_ref()),
+                        48.0,
+                    );
+                    for (icon, label, big) in [
+                        (Icon::Prev, tr!("Brano precedente", "Previous track"), false),
+                        (
+                            if st.loaded && !st.paused {
+                                Icon::Pause
+                            } else {
+                                Icon::Play
+                            },
+                            if st.loaded && !st.paused {
+                                tr!("Pausa", "Pause")
+                            } else {
+                                tr!("Riproduci", "Play")
+                            },
+                            true,
+                        ),
+                        (Icon::Next, tr!("Brano successivo", "Next track"), false),
+                    ] {
+                        if icon_button(ui, icon, label, big).clicked() {
+                            action = Some(icon);
+                        }
+                    }
+                    ui.vertical(|ui| {
+                        ui.set_max_width((ui.available_width() - 150.0).max(80.0));
+                        ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
+                        let who = if track.artist.is_empty() {
+                            album.1.clone()
+                        } else {
+                            track.artist.clone()
+                        };
+                        let sub = [who, album.0.clone()]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(sub)
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            )
+                            .truncate(),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().slider_width = 90.0;
+                        let mut vol = self.cfg.volume;
+                        let resp = ui
+                            .add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false))
+                            .on_hover_text(tr!("Volume", "Volume"));
+                        if resp.changed() {
+                            self.cfg.volume = vol;
+                            self.engine.set_volume(vol);
+                        }
+                        if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                            self.cfg.save();
+                        }
+                        ui.label(RichText::new(tr!("Volume", "Volume")).small());
+                    });
+                });
+                // posizione nel brano
+                let dur = track.duration.unwrap_or_default().as_secs_f32();
+                ui.horizontal(|ui| {
+                    let pos = self
+                        .listen
+                        .seek_drag
+                        .unwrap_or(st.pos.as_secs_f32())
+                        .min(dur.max(0.0));
+                    ui.label(RichText::new(player::fmt_time(Duration::from_secs_f32(pos))).small());
+                    ui.spacing_mut().slider_width = (ui.available_width() - 60.0).max(80.0);
+                    let mut v = pos;
+                    let resp = ui.add_enabled(
+                        dur > 0.0,
+                        egui::Slider::new(&mut v, 0.0..=dur.max(1.0)).show_value(false),
+                    );
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Slider,
+                            dur > 0.0,
+                            tr!("Posizione nel brano", "Position in the track"),
+                        )
+                    });
+                    if resp.dragged() || resp.changed() {
+                        self.listen.seek_drag = Some(v);
+                    }
+                    if resp.drag_stopped() || (resp.changed() && !resp.dragged()) {
+                        self.engine.seek(Duration::from_secs_f32(v));
+                        self.listen.seek_drag = None;
+                    }
+                    ui.label(RichText::new(player::fmt_time(Duration::from_secs_f32(dur))).small());
+                });
+                if let Some(e) = &st.error {
+                    ui.label(RichText::new(e).small().color(ERR));
+                }
+            });
+        if action.is_some() {
+            ui.ctx().request_repaint();
+        }
+        match action {
+            Some(Icon::Prev) => self.play_prev(),
+            Some(Icon::Next) => self.play_next(),
+            Some(Icon::Play) | Some(Icon::Pause) => self.toggle_play(),
+            None => {}
+        }
+    }
+}
+
+/// «1 brano», «12 brani».
+fn tracks_label(n: usize) -> String {
+    match n {
+        1 => tr!("1 brano", "1 track").into(),
+        n => tr!(format!("{n} brani"), format!("{n} tracks")),
+    }
+}
+
+/// Lato delle copertine nell'elenco degli album e nella pagina di un album.
+const COVER_LIST: f32 = 56.0;
+const COVER_BIG: f32 = 120.0;
 
 // ───────────────────────────── utilità ─────────────────────────────
 

@@ -33,6 +33,10 @@ pub struct Config {
     pub search_source: crate::search::Source,
     /// quanti download insieme (1–4)
     pub parallel: u32,
+    /// cartella della musica da ascoltare (None = quella dei download)
+    pub player_dir: Option<PathBuf>,
+    /// volume del player (0–1)
+    pub volume: f32,
 }
 
 impl Default for Config {
@@ -58,6 +62,8 @@ impl Default for Config {
             ui_scale: 1.0,
             search_source: Default::default(),
             parallel: 3,
+            player_dir: None,
+            volume: 0.8,
         }
     }
 }

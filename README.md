@@ -21,6 +21,9 @@ The interface is in Italian if your system language is Italian, and in English o
   Search **YouTube** or **YouTube Music** (songs, albums or videos): an album is downloaded
   in full, in a folder with its name. To use your Google account, pick the browser you are
   signed in with in *Advanced options → Use browser cookies*.
+- **Listen**: a built-in player. Choose the music folder (the download folder by default): albums
+  with their covers, tracks in track order, play/pause, previous/next, a bar to move within the
+  track and volume. MP3, M4A, FLAC, WAV and OGG (not Opus).
 - **Several downloads at once** (3 by default, 1 to 4 in the advanced options): an album is split
   into its tracks, downloaded in parallel, with the track number also in the metadata.
 - **Playlists**: files go into a folder named after the playlist and are called

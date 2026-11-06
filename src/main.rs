@@ -7,6 +7,7 @@ mod config;
 mod downloader;
 mod i18n;
 mod net;
+mod player;
 mod search;
 mod selfupdate;
 mod spotify;

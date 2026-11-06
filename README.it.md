@@ -21,6 +21,9 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   Si può cercare su **YouTube** o su **YouTube Music** (brani, album o video): un album si
   scarica tutto, in una cartella con il suo nome. Per usare il proprio account Google,
   scegli il browser in cui hai fatto l'accesso in *Opzioni avanzate → Usa i cookie del browser*.
+- **Ascolta**: un player integrato. Scegli la cartella della musica (di serie quella dei download):
+  gli album con le copertine, i brani in ordine di traccia, riproduci/pausa, precedente/successivo,
+  barra per spostarsi nel brano e volume. MP3, M4A, FLAC, WAV e OGG (Opus no).
 - **Più download insieme** (di serie 3, da 1 a 4 nelle opzioni avanzate): un album si divide nei
   suoi brani, scaricati in parallelo, con il numero del brano anche nei metadati.
 - **Playlist**: i file vanno in una cartella con il nome della playlist e si chiamano

@@ -119,6 +119,9 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # il player audio usa ALSA: servono le sue intestazioni per compilare
+      - name: Librerie di sistema
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       # "bash" davanti allo script: caricando da zip o da Windows il file perde il
       # permesso di esecuzione e GitHub darebbe "exit code 126".
       - name: Costruisci l'AppImage
@@ -144,6 +147,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Librerie di sistema
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Costruisci l'AppImage
         run: ARCH=aarch64 bash packaging/linux/build-appimage.sh
       - uses: actions/upload-artifact@v4

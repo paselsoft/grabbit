@@ -2,7 +2,7 @@
 name = "grabbit"
 version = "0.1.5"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Download video and music from YouTube and Spotify with yt-dlp, with a simple graphical interface"
 license = "GPL-3.0-or-later"
 # IMPORTANTE: metti qui l'URL del tuo repository GitHub. L'aggiornamento
@@ -30,6 +30,11 @@ self-replace = "1"
 # estrazione di ffmpeg e Deno (zip) e di ffmpeg su Linux (tar.xz)
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sys-locale = "0.3.2"
+# player audio («Ascolta»): riproduzione con cpal (CoreAudio, WASAPI, ALSA) e decodifica
+# in Rust puro con symphonia: MP3, M4A/AAC, FLAC, WAV, OGG Vorbis (Opus no)
+rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] }
+# lettura di titoli, artisti, numeri di traccia e copertine (la stessa versione usata da rodio)
+symphonia = { version = "0.5", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tar = "0.4"
