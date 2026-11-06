@@ -13,11 +13,16 @@ cargo build --release
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" \
          "$APPDIR/usr/share/applications" \
+         "$APPDIR/usr/share/metainfo" \
          "$APPDIR/usr/share/icons/hicolor/512x512/apps"
 
 cp target/release/grabbit                "$APPDIR/usr/bin/grabbit"
-cp packaging/linux/grabbit.desktop       "$APPDIR/grabbit.desktop"
-cp packaging/linux/grabbit.desktop       "$APPDIR/usr/share/applications/grabbit.desktop"
+# nome del file .desktop = identificativo AppStream (forma «io.github.…»): appimagetool
+# cerca la descrizione con lo stesso nome e appstreamcli vuole che coincidano
+ID="io.github.paselsoft.grabbit"
+cp "packaging/linux/$ID.desktop"         "$APPDIR/$ID.desktop"
+cp "packaging/linux/$ID.desktop"         "$APPDIR/usr/share/applications/$ID.desktop"
+cp "packaging/linux/$ID.appdata.xml"     "$APPDIR/usr/share/metainfo/$ID.appdata.xml"
 cp assets/icon.png                       "$APPDIR/grabbit.png"
 cp assets/icon.png                       "$APPDIR/usr/share/icons/hicolor/512x512/apps/grabbit.png"
 ln -sf usr/bin/grabbit                   "$APPDIR/AppRun"

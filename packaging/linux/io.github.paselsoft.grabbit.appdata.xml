@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Descrizione AppStream di Grabbit: la leggono i negozi di app di Linux e appimagetool. -->
+<component type="desktop-application">
+  <id>io.github.paselsoft.grabbit</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Grabbit</name>
+  <summary>Download video and music from YouTube and Spotify</summary>
+  <summary xml:lang="it">Scarica video e musica da YouTube e Spotify</summary>
+  <description>
+    <p>
+      Grabbit downloads video and music with a simple interface, using yt-dlp. It searches
+      YouTube and YouTube Music (songs, albums, videos and an artist's whole discography),
+      saves audio as MP3, M4A, Opus, OGG, FLAC or WAV with cover art and metadata, downloads
+      several tracks at once and includes a player to listen to the downloaded music.
+    </p>
+    <p xml:lang="it">
+      Grabbit scarica video e musica con un'interfaccia semplice, usando yt-dlp. Cerca su
+      YouTube e YouTube Music (brani, album, video e la discografia completa di un artista),
+      salva l'audio in MP3, M4A, Opus, OGG, FLAC o WAV con copertina e metadati, scarica più
+      brani insieme e ha un player per ascoltare la musica scaricata.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.paselsoft.grabbit.desktop</launchable>
+  <provides>
+    <binary>grabbit</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Network</category>
+  </categories>
+  <url type="homepage">https://github.com/paselsoft/grabbit</url>
+  <url type="bugtracker">https://github.com/paselsoft/grabbit/issues</url>
+  <developer_name>Grabbit contributors</developer_name>
+  <content_rating type="oars-1.1"/>
+</component>
