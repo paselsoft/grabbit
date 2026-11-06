@@ -2,6 +2,7 @@
 //! Gestione degli strumenti esterni: yt-dlp, Deno (runtime JS richiesto da
 //! yt-dlp per YouTube) e ffmpeg. Vengono scaricati nella cartella dati
 //! dell'app e tenuti aggiornati automaticamente.
+use crate::downloader::JsRuntime;
 use crate::net;
 use crate::tr;
 use anyhow::{anyhow, bail, Context, Result};
@@ -44,7 +45,32 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    #[cfg(target_os = "macos")]
+    c.env("PATH", macos_path());
     c
+}
+
+/// Le app aperte dal Finder ricevono un PATH minimo (/usr/bin:/bin:…): senza le cartelle
+/// dove si installano Python (python.org) e Homebrew, la versione di yt-dlp per Python
+/// (che si avvia con `#!/usr/bin/env python3`) non troverebbe python3.
+#[cfg(target_os = "macos")]
+fn macos_path() -> std::ffi::OsString {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for extra in [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/Library/Frameworks/Python.framework/Versions/Current/bin",
+        "/usr/bin",
+        "/bin",
+    ] {
+        let extra = PathBuf::from(extra);
+        if !dirs.contains(&extra) {
+            dirs.push(extra);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -69,11 +95,30 @@ fn pct(done: u64, total: Option<u64>) -> String {
 
 // ───────────────────────────── yt-dlp ─────────────────────────────
 
+/// Versione di yt-dlp che gira con Python (un unico file che comincia con `#!`):
+/// serve sui Mac in cui `yt-dlp_macos` non parte (macOS precedenti a 10.15).
+const YTDLP_PYTHON: &str = "yt-dlp";
+
+/// Il yt-dlp installato è la versione per Python? (si riconosce da `#!` all'inizio)
+fn installed_is_python_zipapp() -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 2];
+    File::open(ytdlp_path())
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|_| &head == b"#!")
+        .unwrap_or(false)
+}
+
 fn ytdlp_asset() -> &'static str {
     if cfg!(windows) {
         "yt-dlp.exe"
     } else if cfg!(target_os = "macos") {
-        "yt-dlp_macos"
+        // una volta passati alla versione per Python, gli aggiornamenti restano su quella
+        if installed_is_python_zipapp() {
+            YTDLP_PYTHON
+        } else {
+            "yt-dlp_macos"
+        }
     } else if cfg!(target_arch = "aarch64") {
         "yt-dlp_linux_aarch64"
     } else {
@@ -108,10 +153,11 @@ fn latest_ytdlp_version() -> Result<String> {
 }
 
 fn install_ytdlp(status: &mut dyn FnMut(String)) -> Result<()> {
-    let url = format!(
-        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/{}",
-        ytdlp_asset()
-    );
+    install_ytdlp_asset(ytdlp_asset(), status)
+}
+
+fn install_ytdlp_asset(asset: &str, status: &mut dyn FnMut(String)) -> Result<()> {
+    let url = format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}");
     let dest = ytdlp_path();
     net::download(&url, &dest, &mut |d, t| {
         status(tr!(
@@ -151,12 +197,92 @@ pub fn ensure_ytdlp(status: &mut dyn FnMut(String)) -> Result<String> {
             }
         }
     }
-    local_ytdlp_version().ok_or_else(|| {
-        anyhow!(tr!(
-            "yt-dlp non si avvia dopo l'installazione",
-            "yt-dlp does not start after installation"
+    if let Some(v) = local_ytdlp_version() {
+        return Ok(v);
+    }
+    // macOS vecchi (High Sierra, Mojave): yt-dlp_macos richiede macOS 10.15 e non parte.
+    // Si passa alla versione per Python, che funziona se è installato Python 3.10 o più recente.
+    if cfg!(target_os = "macos") && !installed_is_python_zipapp() {
+        status(
+            tr!(
+                "Questa versione di macOS è troppo vecchia per yt-dlp: provo la versione per Python…",
+                "This macOS version is too old for yt-dlp: trying the Python version…"
+            )
+            .into(),
+        );
+        install_ytdlp_asset(YTDLP_PYTHON, status)
+            .context(tr!("installazione di yt-dlp", "installing yt-dlp"))?;
+        if let Some(v) = local_ytdlp_version() {
+            return Ok(v);
+        }
+        bail!(tr!(
+            "su questa versione di macOS yt-dlp ha bisogno di Python 3.10 o più recente. Installalo da python.org (Python 3.13, «macOS installer», poi apri «Install Certificates.command» nella cartella Applicazioni → Python 3.13) e premi Riprova.",
+            "on this macOS version yt-dlp needs Python 3.10 or newer. Install it from python.org (Python 3.13, “macOS installer”, then open “Install Certificates.command” in Applications → Python 3.13) and press Retry."
+        ));
+    }
+    bail!(tr!(
+        "yt-dlp non si avvia dopo l'installazione",
+        "yt-dlp does not start after installation"
+    ))
+}
+
+/// Moduli Python che la versione di yt-dlp per Python non contiene (la versione per Mac
+/// sì): (nome del pacchetto, nome per `import`). mutagen serve a incorporare le copertine
+/// in M4A, MP3 e FLAC (senza, yt-dlp ripiega su ffprobe, che non c'è, e la copertina
+/// resta accanto al brano come file .jpg); requests e brotli rendono le richieste più
+/// efficienti.
+const PYTHON_MODULES: [(&str, &str); 3] = [
+    ("mutagen", "mutagen"),
+    ("requests", "requests"),
+    ("brotli", "brotli"),
+];
+
+/// Se si usa la versione di yt-dlp per Python, installa una volta sola (con pip, nella
+/// cartella dell'utente) i moduli che le mancano. Negli altri casi non fa nulla.
+/// Restituisce un errore solo se manca mutagen, l'unico indispensabile.
+pub fn ensure_python_modules(status: &mut dyn FnMut(String)) -> Result<()> {
+    if !installed_is_python_zipapp() {
+        return Ok(());
+    }
+    let has = |module: &str| {
+        command("python3")
+            .args(["-c", &format!("import {module}")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    for (package, module) in PYTHON_MODULES {
+        if has(module) {
+            continue;
+        }
+        status(tr!(
+            format!("Installo il componente Python «{package}» per yt-dlp…"),
+            format!("Installing the Python component “{package}” for yt-dlp…")
+        ));
+        // un pacchetto alla volta: se uno facoltativo non si installa, gli altri sì;
+        // --only-binary: mai compilare da sorgente (servirebbero gli strumenti di Xcode)
+        let _ = command("python3")
+            .args([
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "--quiet",
+                "--disable-pip-version-check",
+                "--only-binary",
+                ":all:",
+                package,
+            ])
+            .output();
+    }
+    if has("mutagen") {
+        Ok(())
+    } else {
+        bail!(tr!(
+            "installazione di mutagen non riuscita; prova nel Terminale: python3 -m pip install --user mutagen",
+            "mutagen could not be installed; try in Terminal: python3 -m pip install --user mutagen"
         ))
-    })
+    }
 }
 
 // ───────────────────────────── Deno ─────────────────────────────
@@ -177,7 +303,9 @@ fn deno_target() -> Option<&'static str> {
 pub fn ensure_deno(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
     let dest = deno_path();
     if dest.exists() {
-        return Ok(dest);
+        // già scaricato: va usato solo se parte davvero. Se non parte (es. macOS troppo
+        // vecchio) non lo si riscarica a ogni avvio: si avvisa e basta.
+        return check_deno(dest);
     }
     let target = deno_target().ok_or_else(|| {
         anyhow!(tr!(
@@ -202,7 +330,85 @@ pub fn ensure_deno(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
             "Deno not found in the archive"
         ));
     }
-    Ok(dest)
+    check_deno(dest)
+}
+
+fn check_deno(dest: PathBuf) -> Result<PathBuf> {
+    let runs = command(&dest)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if runs {
+        Ok(dest)
+    } else {
+        bail!(tr!(
+            "Deno non funziona su questa versione del sistema operativo",
+            "Deno does not work on this operating system version"
+        ))
+    }
+}
+
+// ───────────────────────────── QuickJS ─────────────────────────────
+
+/// Runtime JavaScript per yt-dlp: Deno; sui Mac dove Deno non parte (le sue versioni
+/// richiedono un macOS recente) si ripiega su QuickJS, più lento ma leggero.
+pub fn ensure_js_runtime(status: &mut dyn FnMut(String)) -> Result<JsRuntime> {
+    match ensure_deno(status) {
+        Ok(p) => Ok(JsRuntime::deno(p)),
+        Err(e) if cfg!(target_os = "macos") => ensure_quickjs(status)
+            .map(JsRuntime::quickjs)
+            .map_err(|q| anyhow!("{e:#}; QuickJS: {q:#}")),
+        Err(e) => Err(e),
+    }
+}
+
+/// QuickJS-ng nella versione universale (Cosmopolitan, «APE»): gira anche su macOS
+/// vecchi come High Sierra, dove la versione per Mac non parte. Un file APE però non
+/// si avvia direttamente: va passato a `sh`. Per questo yt-dlp riceve un piccolo
+/// script (`qjs`) che lo avvia nel modo giusto.
+const QUICKJS_URL: &str =
+    "https://github.com/quickjs-ng/quickjs/releases/latest/download/qjs-cosmo.com";
+
+const QUICKJS_LAUNCHER: &str = r#"#!/bin/sh
+# Avvia QuickJS (versione universale Cosmopolitan) per yt-dlp: creato da Grabbit.
+q="$(dirname "$0")/qjs.com"
+case "$(head -c 2 "$q")" in
+  MZ) exec /bin/sh "$q" "$@" ;;
+  *) exec "$q" "$@" ;;
+esac
+"#;
+
+pub fn ensure_quickjs(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
+    let dir = bin_dir();
+    let com = dir.join("qjs.com");
+    let launcher = dir.join("qjs");
+    if !com.exists() {
+        net::download(QUICKJS_URL, &com, &mut |d, t| {
+            status(tr!(
+                format!("Scarico il runtime JavaScript (QuickJS)… {}", pct(d, t)),
+                format!(
+                    "Downloading the JavaScript runtime (QuickJS)… {}",
+                    pct(d, t)
+                )
+            ))
+        })?;
+        make_executable(&com)?;
+    }
+    if fs::read_to_string(&launcher).ok().as_deref() != Some(QUICKJS_LAUNCHER) {
+        fs::write(&launcher, QUICKJS_LAUNCHER)?;
+    }
+    make_executable(&launcher)?;
+    let runs = command(&launcher)
+        .args(["-e", "0"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if runs {
+        Ok(launcher)
+    } else {
+        bail!(tr!("QuickJS non si avvia", "QuickJS does not start"))
+    }
 }
 
 // ───────────────────────────── ffmpeg ─────────────────────────────
@@ -246,13 +452,42 @@ pub fn ensure_ffmpeg(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        // build statiche di evermeet.cx (x86_64; su Apple Silicon usa Rosetta)
-        net::download(
-            "https://evermeet.cx/ffmpeg/getrelease/zip",
-            &tmp,
-            &mut progress,
-        )?;
-        extract_zip(&tmp, &["ffmpeg"], &dest)?;
+        // evermeet.cx, la fonte di prima, ora risponde «410 Gone». ffmpeg arriva dal
+        // pacchetto imageio-ffmpeg su PyPI: un ffmpeg statico che usa solo librerie di
+        // sistema, per Intel da macOS 10.13 (High Sierra) e per Apple Silicon.
+        // Su Apple Silicon, se quello nativo non partisse, si prova quello Intel (Rosetta).
+        let pypi = net::get_json(PYPI_IMAGEIO_FFMPEG)?;
+        let archs: &[&str] = if cfg!(target_arch = "aarch64") {
+            &["arm64", "x86_64"]
+        } else {
+            &["x86_64"]
+        };
+        let exe = dest.join("ffmpeg");
+        let mut ok = false;
+        for arch in archs {
+            let Some(url) = macos_ffmpeg_wheel_url(&pypi, arch) else {
+                continue;
+            };
+            net::download(&url, &tmp, &mut progress)?;
+            extract_wheel_ffmpeg(&tmp, &exe)?;
+            if command(&exe)
+                .arg("-version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                ok = true;
+                break;
+            }
+            let _ = fs::remove_file(&exe);
+        }
+        if !ok {
+            let _ = fs::remove_file(&tmp);
+            bail!(tr!(
+                "nessuna versione di ffmpeg scaricata parte su questo Mac",
+                "no downloaded version of ffmpeg starts on this Mac"
+            ));
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -304,6 +539,51 @@ fn extract_zip(zip_path: &Path, wanted: &[&str], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Dati del pacchetto imageio-ffmpeg su PyPI (elenco dei file dell'ultima versione).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PYPI_IMAGEIO_FFMPEG: &str = "https://pypi.org/pypi/imageio-ffmpeg/json";
+
+/// Indirizzo del pacchetto («wheel») di imageio-ffmpeg per macOS e l'architettura data
+/// ("x86_64" o "arm64"), preso dal JSON di PyPI.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_ffmpeg_wheel_url(pypi: &serde_json::Value, arch: &str) -> Option<String> {
+    pypi.get("urls")?.as_array()?.iter().find_map(|u| {
+        let name = u.get("filename")?.as_str()?;
+        let url = u.get("url")?.as_str()?;
+        (name.ends_with(".whl")
+            && name.contains("macosx")
+            && name.contains(&format!("_{arch}."))
+            && url.starts_with("https://"))
+        .then(|| url.to_string())
+    })
+}
+
+/// Estrae dal pacchetto di imageio-ffmpeg (uno zip) l'eseguibile
+/// `imageio_ffmpeg/binaries/ffmpeg-…` e lo salva in `exe`, pronto da eseguire.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn extract_wheel_ffmpeg(wheel: &Path, exe: &Path) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(File::open(wheel)?)?;
+    let name = archive
+        .file_names()
+        .filter_map(|n| n.ok())
+        .find(|n| n.contains("/binaries/ffmpeg-") && !n.ends_with(".md"))
+        .map(|n| n.into_owned())
+        .ok_or_else(|| {
+            anyhow!(tr!(
+                "ffmpeg non trovato nel pacchetto",
+                "ffmpeg not found in the package"
+            ))
+        })?;
+    let mut entry = archive.by_name(&name)?;
+    if let Some(dir) = exe.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut out = File::create(exe)?;
+    std::io::copy(&mut entry, &mut out)?;
+    drop(out);
+    make_executable(exe)
+}
+
 #[cfg(target_os = "linux")]
 fn extract_tar_xz(path: &Path, dest: &Path) -> Result<()> {
     let file = std::io::BufReader::new(File::open(path)?);
@@ -343,6 +623,77 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn picks_the_macos_ffmpeg_wheel_for_each_arch() {
+        let pypi: serde_json::Value = serde_json::from_str(
+            r#"{"urls": [
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-macosx_10_13_x86_64.whl", "url": "https://files.pythonhosted.org/x86.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-macosx_12_0_arm64.whl", "url": "https://files.pythonhosted.org/arm.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-manylinux_2_28_x86_64.whl", "url": "https://files.pythonhosted.org/linux.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1.tar.gz", "url": "https://files.pythonhosted.org/src.tar.gz"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&pypi, "x86_64").as_deref(),
+            Some("https://files.pythonhosted.org/x86.whl")
+        );
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&pypi, "arm64").as_deref(),
+            Some("https://files.pythonhosted.org/arm.whl")
+        );
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&serde_json::json!({}), "x86_64"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_ffmpeg_from_the_wheel() {
+        let dir = tmpdir("wheel");
+        let whl = dir.join("ff.whl");
+        {
+            let mut w = zip::ZipWriter::new(File::create(&whl).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("imageio_ffmpeg/binaries/README.md", opts)
+                .unwrap();
+            w.write_all(b"leggimi").unwrap();
+            w.start_file("imageio_ffmpeg/binaries/ffmpeg-macos-x86_64-v9.0.2", opts)
+                .unwrap();
+            w.write_all(b"ffmpeg finto").unwrap();
+            w.finish().unwrap();
+        }
+        let exe = dir.join("bin").join("ffmpeg");
+        extract_wheel_ffmpeg(&whl, &exe).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"ffmpeg finto");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&exe).unwrap().permissions().mode() & 0o111,
+                0o111
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Con il pacchetto vero scaricato da PyPI:
+    /// GRABBIT_FFMPEG_WHEEL=/percorso/imageio_ffmpeg-…-macosx_10_13_x86_64.whl cargo test real_wheel -- --ignored
+    #[test]
+    #[ignore]
+    fn real_wheel_contains_a_macho_ffmpeg() {
+        let Ok(whl) = std::env::var("GRABBIT_FFMPEG_WHEEL") else {
+            return;
+        };
+        let dir = tmpdir("realwheel");
+        let exe = dir.join("ffmpeg");
+        extract_wheel_ffmpeg(Path::new(&whl), &exe).unwrap();
+        let head = fs::read(&exe).unwrap();
+        assert!(head.len() > 10_000_000);
+        assert_eq!(&head[..4], &[0xcf, 0xfa, 0xed, 0xfe]); // Mach-O 64 bit
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

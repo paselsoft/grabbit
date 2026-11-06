@@ -23,3 +23,6 @@ jobs:
         with:
           name: grabbit-windows
           path: grabbit-windows-x86_64.exe
+          # account gratuito: 500 MB in tutto per i file delle Actions, quindi
+          # i file si cancellano da soli dopo pochi giorni (le release restano)
+          retention-days: 5

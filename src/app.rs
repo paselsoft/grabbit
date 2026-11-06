@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Interfaccia grafica (egui).
 use crate::config::{Config, Mode};
-use crate::downloader::{self, Emit, Event, Toolset};
+use crate::downloader::{self, Emit, Event, JsRuntime, Toolset};
 use crate::search::{self, SearchResult};
 use crate::selfupdate::{self, Release};
 use crate::tools;
@@ -57,7 +57,7 @@ enum Msg {
     ToolsReady {
         ytdlp: String,
         ffmpeg: Option<PathBuf>,
-        deno: Option<PathBuf>,
+        js: Option<JsRuntime>,
         warnings: Vec<String>,
     },
     ToolsFailed(String),
@@ -69,7 +69,13 @@ enum Msg {
     /// esito di una ricerca; `seq` scarta le risposte di ricerche ormai superate
     SearchDone {
         seq: u64,
-        result: Result<Vec<SearchResult>, String>,
+        result: Result<search::Outcome, String>,
+    },
+    /// titolo, artista, brani e copertina di un album arrivato senza (risultato `idx`)
+    Details {
+        seq: u64,
+        idx: usize,
+        details: Option<search::Details>,
     },
     /// copertina del risultato `idx` della ricerca `seq`, già rimpicciolita
     Thumb {
@@ -103,12 +109,33 @@ enum UpdateUi {
     Failed(String),
 }
 
+/// Filtro delle uscite nella discografia di un artista.
+#[derive(Default, Clone, Copy, PartialEq)]
+enum ReleaseFilter {
+    #[default]
+    Albums,
+    Singles,
+    All,
+}
+
+impl ReleaseFilter {
+    fn shows(self, r: &SearchResult) -> bool {
+        match self {
+            ReleaseFilter::All => true,
+            ReleaseFilter::Albums => is_album(r),
+            ReleaseFilter::Singles => !is_album(r),
+        }
+    }
+}
+
 #[derive(Default)]
 struct SearchUi {
     query: String,
     /// testo cercato per ultimo (per il messaggio «nessun risultato»)
     last_query: String,
     last_source: search::Source,
+    /// ricerca per artista: il nome dell'artista trovato
+    artist: Option<String>,
     results: Vec<SearchResult>,
     /// risultati spuntati per scaricarli insieme (stessi indici di `results`)
     selected: Vec<bool>,
@@ -120,13 +147,15 @@ struct SearchUi {
     cancel: Arc<AtomicBool>,
     /// messaggio dopo «Aggiungi ai link»
     notice: Option<String>,
+    /// discografia di un artista: quali uscite mostrare (come i filtri di YouTube Music)
+    release_filter: ReleaseFilter,
 }
 
 #[derive(Default)]
 struct ToolsUi {
     ytdlp: Option<String>,
     ffmpeg: Option<PathBuf>,
-    deno: Option<PathBuf>,
+    js: Option<JsRuntime>,
     status: String,
     error: Option<String>,
     warnings: Vec<String>,
@@ -154,6 +183,8 @@ pub struct App {
     /// l'aggiornamento in corso è partito da solo (non da un clic): a fine lavoro si riavvia
     update_auto: bool,
     logo: egui::TextureHandle,
+    /// quando è stato copiato il registro (per mostrare «Copiato» per qualche secondo)
+    log_copied: Option<std::time::Instant>,
 }
 
 impl App {
@@ -179,6 +210,7 @@ impl App {
             auto_install: !std::env::args().any(|a| a == selfupdate::AFTER_UPDATE_ARG),
             update_auto: false,
             logo,
+            log_copied: None,
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -213,8 +245,14 @@ impl App {
                 }
             };
             let mut warnings = Vec::new();
-            let deno = tools::ensure_deno(&mut status)
-                .map_err(|e| warnings.push(tr!(format!("Deno non disponibile ({e:#}): alcuni video YouTube potrebbero non funzionare."), format!("Deno is not available ({e:#}): some YouTube videos may not work."))))
+            if let Err(e) = tools::ensure_python_modules(&mut status) {
+                warnings.push(tr!(
+                    format!("componenti Python di yt-dlp non installati ({e:#}): le copertine potrebbero non essere incorporate nei file."),
+                    format!("yt-dlp's Python components are not installed ({e:#}): cover art may not be embedded in the files.")
+                ));
+            }
+            let js = tools::ensure_js_runtime(&mut status)
+                .map_err(|e| warnings.push(tr!(format!("Runtime JavaScript (Deno) non disponibile ({e:#}): alcuni video YouTube potrebbero non funzionare."), format!("JavaScript runtime (Deno) is not available ({e:#}): some YouTube videos may not work."))))
                 .ok();
             let ffmpeg = tools::ensure_ffmpeg(&mut status)
                 .map_err(|e| warnings.push(tr!(format!("ffmpeg non disponibile ({e:#}): serve per la conversione audio e l'unione video/audio. Installalo e riavvia."), format!("ffmpeg is not available ({e:#}): it is needed for audio conversion and merging video/audio. Install it and restart."))))
@@ -222,7 +260,7 @@ impl App {
             send(Msg::ToolsReady {
                 ytdlp,
                 ffmpeg,
-                deno,
+                js,
                 warnings,
             });
         });
@@ -288,7 +326,7 @@ impl App {
         Toolset {
             ytdlp: tools::ytdlp_path(),
             ffmpeg_dir: self.tools.ffmpeg.clone(),
-            deno: self.tools.deno.clone(),
+            js: self.tools.js.clone(),
         }
     }
 
@@ -313,6 +351,7 @@ impl App {
         self.search.error = None;
         self.search.notice = None;
         self.search.last_query = query.clone();
+        self.search.artist = None;
         let seq = self.search.seq;
         let toolset = self.toolset();
         let cookies = self.cfg.cookies_browser.clone();
@@ -326,14 +365,18 @@ impl App {
         });
     }
 
-    /// Scarica le copertine dei risultati, qualcuna alla volta, in thread a parte.
+    /// Completa i risultati in thread a parte, quattro alla volta: per gli album arrivati
+    /// senza titolo chiede a yt-dlp i loro dati, poi scarica le copertine.
     /// Una copertina che non arriva lascia semplicemente il riquadro grigio.
     fn start_thumbnails(&self, ctx: &egui::Context, seq: u64, results: &[SearchResult]) {
-        let work: Vec<(usize, String)> = results
+        // gli album da completare per primi: sono quelli senza titolo
+        let mut work: Vec<(usize, bool, String, Option<String>)> = results
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| r.thumbnail.clone().map(|u| (i, u)))
+            .filter(|(_, r)| r.needs_details || r.thumbnail.is_some())
+            .map(|(i, r)| (i, r.needs_details, r.url.clone(), r.thumbnail.clone()))
             .collect();
+        work.sort_by_key(|w| !w.1);
         let work = Arc::new(std::sync::Mutex::new(work.into_iter()));
         // pixel reali (comprende lo zoom): su uno schermo Retina il riquadro vale il doppio
         let scale = ctx.pixels_per_point().max(1.0);
@@ -341,17 +384,30 @@ impl App {
             (THUMB_SLOT.x * scale).round() as u32,
             (THUMB_SLOT.y * scale).round() as u32,
         );
+        let toolset = self.toolset();
+        let cookies = self.cfg.cookies_browser.clone();
         for _ in 0..4 {
             let work = work.clone();
             let cancel = self.search.cancel.clone();
             let send = self.sender(ctx);
+            let (toolset, cookies) = (toolset.clone(), cookies.clone());
             thread::spawn(move || loop {
                 let next = work.lock().ok().and_then(|mut it| it.next());
-                let Some((idx, url)) = next else { break };
+                let Some((idx, needs_details, url, mut thumb)) = next else {
+                    break;
+                };
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if let Ok((iw, ih, rgba)) = search::fetch_thumbnail(&url, w, h) {
+                if needs_details {
+                    let details = search::fetch_details(&url, &toolset, &cookies, &cancel).ok();
+                    if thumb.is_none() {
+                        thumb = details.as_ref().and_then(|d| d.thumbnail.clone());
+                    }
+                    send(Msg::Details { seq, idx, details });
+                }
+                let Some(thumb) = thumb else { continue };
+                if let Ok((iw, ih, rgba)) = search::fetch_thumbnail(&thumb, w, h) {
                     let image =
                         egui::ColorImage::from_rgba_unmultiplied([iw as usize, ih as usize], &rgba);
                     send(Msg::Thumb { seq, idx, image });
@@ -405,13 +461,13 @@ impl App {
             Msg::ToolsReady {
                 ytdlp,
                 ffmpeg,
-                deno,
+                js,
                 warnings,
             } => {
                 self.tools.busy = false;
                 self.tools.ytdlp = Some(ytdlp);
                 self.tools.ffmpeg = ffmpeg;
-                self.tools.deno = deno;
+                self.tools.js = js;
                 self.tools.warnings = warnings;
             }
             Msg::ToolsFailed(e) => {
@@ -466,6 +522,23 @@ impl App {
             }
             Msg::UpdateDone(Err(e)) => self.update = UpdateUi::Failed(e),
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Details { seq, idx, details } => {
+                if seq == self.search.seq {
+                    if let Some(r) = self.search.results.get_mut(idx) {
+                        r.needs_details = false;
+                        if let Some(d) = details {
+                            if let Some(t) = d.title {
+                                r.title = t;
+                            }
+                            if let Some(a) = d.artist {
+                                r.channel = a;
+                            }
+                            r.tracks = d.tracks.or(r.tracks);
+                            r.thumbnail = r.thumbnail.take().or(d.thumbnail);
+                        }
+                    }
+                }
+            }
             Msg::Thumb { seq, idx, image } => {
                 if seq == self.search.seq {
                     if let Some(slot) = self.search.thumbs.get_mut(idx) {
@@ -483,7 +556,9 @@ impl App {
                 }
                 self.search.busy = false;
                 match result {
-                    Ok(r) => {
+                    Ok(outcome) => {
+                        let r = outcome.results;
+                        self.search.artist = outcome.artist;
                         self.search.selected = vec![false; r.len()];
                         self.search.thumbs = vec![None; r.len()];
                         self.start_thumbnails(ctx, seq, &r);
@@ -509,6 +584,7 @@ impl App {
                         state: JobState::Waiting,
                     });
                 }
+                Event::JobRemoved { id } => self.jobs.retain(|j| j.id != id),
                 Event::JobLabel { id, label } => {
                     if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                         j.label = label;
@@ -563,7 +639,7 @@ impl eframe::App for App {
                     self.action_row(ui, ctx);
                     ui.add_space(10.0);
                     self.queue(ui);
-                    self.log_view(ui);
+                    self.log_view(ui, ctx);
                     ui.add_space(6.0);
                     self.footer(ui);
                 });
@@ -855,8 +931,16 @@ impl App {
                 Mode::Video => tr!("come video", "as video"),
                 Mode::Audio => tr!("come audio", "as audio"),
             };
-            ui.label(
-                RichText::new(tr!(
+            let header = match (&self.search.artist, self.search.last_source) {
+                (Some(name), search::Source::MusicArtist) => tr!(
+                    format!(
+                        "Discografia di {name} · «Scarica» scarica tutto l'album {what}, con le opzioni qui sotto."
+                    ),
+                    format!(
+                        "Discography of {name} · “Download” saves the whole album {what}, with the options below."
+                    )
+                ),
+                _ => tr!(
                     format!(
                         "{} risultati su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
                         res.len(),
@@ -869,20 +953,71 @@ impl App {
                         self.search.last_source.label(),
                         self.search.last_query
                     )
-                ))
-                .small()
-                .color(ui.visuals().weak_text_color()),
+                ),
+            };
+            ui.label(
+                RichText::new(header)
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
             );
+            // discografia: filtri come quelli di YouTube Music (Album / Singoli ed EP)
+            let artist_mode = self.search.last_source == search::Source::MusicArtist;
+            if artist_mode {
+                let albums = res.iter().filter(|r| is_album(r)).count();
+                let singles = res.len() - albums;
+                ui.horizontal_wrapped(|ui| {
+                    for (f, label) in [
+                        (
+                            ReleaseFilter::Albums,
+                            tr!(format!("Album ({albums})"), format!("Albums ({albums})")),
+                        ),
+                        (
+                            ReleaseFilter::Singles,
+                            tr!(
+                                format!("Singoli ed EP ({singles})"),
+                                format!("Singles and EPs ({singles})")
+                            ),
+                        ),
+                        (
+                            ReleaseFilter::All,
+                            tr!(
+                                format!("Tutto ({})", res.len()),
+                                format!("All ({})", res.len())
+                            ),
+                        ),
+                    ] {
+                        let on = self.search.release_filter == f;
+                        let text = RichText::new(label).color(if on {
+                            ON_ACCENT
+                        } else {
+                            ui.visuals().text_color()
+                        });
+                        if ui.selectable_label(on, text).clicked() {
+                            self.search.release_filter = f;
+                        }
+                    }
+                });
+            }
+            let filter = if artist_mode {
+                self.search.release_filter
+            } else {
+                ReleaseFilter::All
+            };
             ui.add_space(2.0);
             egui::ScrollArea::vertical()
                 .id_salt("search_results")
                 .max_height(330.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    let mut shown = 0;
                     for (i, r) in self.search.results.iter().enumerate() {
-                        if i > 0 {
+                        if !filter.shows(r) {
+                            continue;
+                        }
+                        if shown > 0 {
                             ui.separator();
                         }
+                        shown += 1;
                         ui.horizontal(|ui| {
                             let sel = &mut self.search.selected[i];
                             let resp = ui.add(egui::Checkbox::without_text(sel));
@@ -935,16 +1070,36 @@ impl App {
                             }
 
                             ui.vertical(|ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(&r.title).strong()).truncate(),
-                                )
-                                .on_hover_text(&r.title);
+                                if r.needs_details {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(
+                                            RichText::new(tr!(
+                                                "Album: carico titolo e copertina…",
+                                                "Album: loading title and cover…"
+                                            ))
+                                            .color(ui.visuals().weak_text_color()),
+                                        );
+                                    });
+                                } else {
+                                    ui.add(
+                                        egui::Label::new(RichText::new(&r.title).strong())
+                                            .truncate(),
+                                    )
+                                    .on_hover_text(&r.title);
+                                }
                                 let mut meta: Vec<String> = Vec::new();
                                 if r.collection {
-                                    meta.push(tr!("Album / playlist", "Album / playlist").into());
+                                    meta.push(release_kind(r));
+                                }
+                                if let Some(y) = &r.year {
+                                    meta.push(y.clone());
                                 }
                                 if !r.channel.is_empty() {
                                     meta.push(r.channel.clone());
+                                }
+                                if let Some(n) = r.tracks {
+                                    meta.push(tr!(format!("{n} brani"), format!("{n} tracks")));
                                 }
                                 if let Some(d) = r.duration {
                                     meta.push(search::fmt_duration(d));
@@ -1016,7 +1171,14 @@ impl App {
                     }
                 });
 
-            let n_sel = self.search.selected.iter().filter(|s| **s).count();
+            // si scaricano solo i risultati spuntati e visibili con il filtro scelto
+            let n_sel = self
+                .search
+                .results
+                .iter()
+                .zip(&self.search.selected)
+                .filter(|(r, s)| **s && filter.shows(r))
+                .count();
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 let picked = || {
@@ -1024,7 +1186,7 @@ impl App {
                         .results
                         .iter()
                         .zip(&self.search.selected)
-                        .filter(|(_, s)| **s)
+                        .filter(|(r, s)| **s && filter.shows(r))
                         .map(|(r, _)| r.url.clone())
                         .collect::<Vec<_>>()
                 };
@@ -1091,6 +1253,7 @@ impl App {
             self.search.selected.clear();
             self.search.thumbs.clear();
             self.search.last_query.clear();
+            self.search.artist = None;
             self.search.error = None;
             self.search.notice = None;
         }
@@ -1305,6 +1468,29 @@ impl App {
                         });
                     ui.label(RichText::new(tr!("(oppure Ctrl + e Ctrl −)", "(or Ctrl + and Ctrl −)")).small().color(ui.visuals().weak_text_color()));
                 });
+                ui.horizontal(|ui| {
+                    ui.label(tr!("Download contemporanei", "Simultaneous downloads"));
+                    egui::ComboBox::from_id_salt("parallel")
+                        .selected_text(self.cfg.parallel.clamp(1, 4).to_string())
+                        .show_ui(ui, |ui| {
+                            for n in 1..=4u32 {
+                                if ui
+                                    .selectable_value(&mut self.cfg.parallel, n, n.to_string())
+                                    .clicked()
+                                {
+                                    self.cfg.save();
+                                }
+                            }
+                        });
+                    ui.label(
+                        RichText::new(tr!(
+                            "(brani scaricati insieme: gli album si scaricano prima)",
+                            "(tracks downloaded at the same time: albums finish sooner)"
+                        ))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                    );
+                });
                 ui.checkbox(&mut self.cfg.auto_update_app, tr!("Installa automaticamente gli aggiornamenti di Grabbit", "Install Grabbit updates automatically"));
                 ui.horizontal(|ui| {
                     let can_check = !self.update_checking && !matches!(self.update, UpdateUi::Working(_));
@@ -1430,12 +1616,34 @@ impl App {
         });
     }
 
-    fn log_view(&self, ui: &mut egui::Ui) {
+    fn log_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         if self.log.is_empty() {
             return;
         }
         ui.add_space(6.0);
+        let mut copy = false;
         ui.collapsing(tr!("Registro dettagliato", "Detailed log"), |ui| {
+            ui.horizontal(|ui| {
+                copy = ui
+                    .button(tr!("Copia tutto il registro", "Copy the whole log"))
+                    .on_hover_text(tr!(
+                        "Copia negli appunti il registro, con le versioni di Grabbit e degli strumenti",
+                        "Copy the log to the clipboard, with the versions of Grabbit and its tools"
+                    ))
+                    .clicked();
+                if let Some(t) = self.log_copied {
+                    if t.elapsed().as_secs() < 3 {
+                        ui.label(
+                            RichText::new(tr!("Copiato negli appunti ✓", "Copied to the clipboard ✓"))
+                                .small()
+                                .color(OK),
+                        );
+                        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    } else {
+                        self.log_copied = None;
+                    }
+                }
+            });
             egui::ScrollArea::vertical()
                 .max_height(180.0)
                 .stick_to_bottom(true)
@@ -1445,6 +1653,31 @@ impl App {
                     }
                 });
         });
+        if copy {
+            ctx.copy_text(self.log_report());
+            self.log_copied = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Il registro intero, preceduto da versioni e sistema: pronto da incollare in una
+    /// segnalazione.
+    fn log_report(&self) -> String {
+        let yes = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
+        let mut out = format!(
+            "Grabbit {} · {} {} · yt-dlp {} · ffmpeg {} · {} {}\n\n",
+            selfupdate::CURRENT,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            self.tools.ytdlp.as_deref().unwrap_or("?"),
+            yes(self.tools.ffmpeg.is_some()),
+            self.tools.js.as_ref().map(|j| j.name()).unwrap_or("Deno"),
+            yes(self.tools.js.is_some()),
+        );
+        for l in &self.log {
+            out.push_str(l);
+            out.push('\n');
+        }
+        out
     }
 
     fn footer(&self, ui: &mut egui::Ui) {
@@ -1453,11 +1686,12 @@ impl App {
         let ok = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
         ui.label(
             RichText::new(format!(
-                "Grabbit {} · yt-dlp {} · ffmpeg {} · Deno {}",
+                "Grabbit {} · yt-dlp {} · ffmpeg {} · {} {}",
                 selfupdate::CURRENT,
                 yt,
                 ok(self.tools.ffmpeg.is_some()),
-                ok(self.tools.deno.is_some()),
+                self.tools.js.as_ref().map(|j| j.name()).unwrap_or("Deno"),
+                ok(self.tools.js.is_some()),
             ))
             .small()
             .color(ui.visuals().weak_text_color()),
@@ -1481,6 +1715,27 @@ impl App {
 
 /// Riquadro della copertina nei risultati della ricerca (16:9, come le miniature YouTube).
 const THUMB_SLOT: egui::Vec2 = egui::vec2(112.0, 63.0);
+
+/// È un album (e non un singolo, un EP o una playlist)?
+fn is_album(r: &SearchResult) -> bool {
+    release_kind(r).eq_ignore_ascii_case("album")
+}
+
+/// «Album», «Singolo» o «Playlist» per un risultato che raccoglie più brani.
+fn release_kind(r: &SearchResult) -> String {
+    // come lo scrive YouTube Music, quando lo dice («Album», «Singolo», «EP»)
+    if let Some(k) = &r.kind {
+        return k.clone();
+    }
+    // gli album hanno indirizzi …/browse/MPREb_… (YouTube Music) o playlist OLAK5uy_…
+    let album = r.url.contains("/browse/MPREb") || r.url.contains("list=OLAK5uy");
+    match r.tracks {
+        Some(1..=3) if album => tr!("Singolo", "Single"),
+        _ if album => "Album",
+        _ => "Playlist",
+    }
+    .into()
+}
 
 /// Dimensione di `size` rimpicciolita per stare dentro `slot` senza deformarsi.
 fn fit(size: egui::Vec2, slot: egui::Vec2) -> egui::Vec2 {
