@@ -393,13 +393,42 @@ pub fn ensure_ffmpeg(status: &mut dyn FnMut(String)) -> Result<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        // build statiche di evermeet.cx (x86_64; su Apple Silicon usa Rosetta)
-        net::download(
-            "https://evermeet.cx/ffmpeg/getrelease/zip",
-            &tmp,
-            &mut progress,
-        )?;
-        extract_zip(&tmp, &["ffmpeg"], &dest)?;
+        // evermeet.cx, la fonte di prima, ora risponde «410 Gone». ffmpeg arriva dal
+        // pacchetto imageio-ffmpeg su PyPI: un ffmpeg statico che usa solo librerie di
+        // sistema, per Intel da macOS 10.13 (High Sierra) e per Apple Silicon.
+        // Su Apple Silicon, se quello nativo non partisse, si prova quello Intel (Rosetta).
+        let pypi = net::get_json(PYPI_IMAGEIO_FFMPEG)?;
+        let archs: &[&str] = if cfg!(target_arch = "aarch64") {
+            &["arm64", "x86_64"]
+        } else {
+            &["x86_64"]
+        };
+        let exe = dest.join("ffmpeg");
+        let mut ok = false;
+        for arch in archs {
+            let Some(url) = macos_ffmpeg_wheel_url(&pypi, arch) else {
+                continue;
+            };
+            net::download(&url, &tmp, &mut progress)?;
+            extract_wheel_ffmpeg(&tmp, &exe)?;
+            if command(&exe)
+                .arg("-version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                ok = true;
+                break;
+            }
+            let _ = fs::remove_file(&exe);
+        }
+        if !ok {
+            let _ = fs::remove_file(&tmp);
+            bail!(tr!(
+                "nessuna versione di ffmpeg scaricata parte su questo Mac",
+                "no downloaded version of ffmpeg starts on this Mac"
+            ));
+        }
     }
     #[cfg(target_os = "linux")]
     {
@@ -452,6 +481,51 @@ fn extract_zip(zip_path: &Path, wanted: &[&str], dest: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+/// Dati del pacchetto imageio-ffmpeg su PyPI (elenco dei file dell'ultima versione).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const PYPI_IMAGEIO_FFMPEG: &str = "https://pypi.org/pypi/imageio-ffmpeg/json";
+
+/// Indirizzo del pacchetto («wheel») di imageio-ffmpeg per macOS e l'architettura data
+/// ("x86_64" o "arm64"), preso dal JSON di PyPI.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_ffmpeg_wheel_url(pypi: &serde_json::Value, arch: &str) -> Option<String> {
+    pypi.get("urls")?.as_array()?.iter().find_map(|u| {
+        let name = u.get("filename")?.as_str()?;
+        let url = u.get("url")?.as_str()?;
+        (name.ends_with(".whl")
+            && name.contains("macosx")
+            && name.contains(&format!("_{arch}."))
+            && url.starts_with("https://"))
+        .then(|| url.to_string())
+    })
+}
+
+/// Estrae dal pacchetto di imageio-ffmpeg (uno zip) l'eseguibile
+/// `imageio_ffmpeg/binaries/ffmpeg-…` e lo salva in `exe`, pronto da eseguire.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn extract_wheel_ffmpeg(wheel: &Path, exe: &Path) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(File::open(wheel)?)?;
+    let name = archive
+        .file_names()
+        .filter_map(|n| n.ok())
+        .find(|n| n.contains("/binaries/ffmpeg-") && !n.ends_with(".md"))
+        .map(|n| n.into_owned())
+        .ok_or_else(|| {
+            anyhow!(tr!(
+                "ffmpeg non trovato nel pacchetto",
+                "ffmpeg not found in the package"
+            ))
+        })?;
+    let mut entry = archive.by_name(&name)?;
+    if let Some(dir) = exe.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut out = File::create(exe)?;
+    std::io::copy(&mut entry, &mut out)?;
+    drop(out);
+    make_executable(exe)
+}
+
 fn extract_tar_xz(path: &Path, dest: &Path) -> Result<()> {
     let file = std::io::BufReader::new(File::open(path)?);
     let mut archive = tar::Archive::new(xz2::read::XzDecoder::new(file));
@@ -490,6 +564,77 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn picks_the_macos_ffmpeg_wheel_for_each_arch() {
+        let pypi: serde_json::Value = serde_json::from_str(
+            r#"{"urls": [
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-macosx_10_13_x86_64.whl", "url": "https://files.pythonhosted.org/x86.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-macosx_12_0_arm64.whl", "url": "https://files.pythonhosted.org/arm.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1-py3-none-manylinux_2_28_x86_64.whl", "url": "https://files.pythonhosted.org/linux.whl"},
+              {"filename": "imageio_ffmpeg-0.8.1.tar.gz", "url": "https://files.pythonhosted.org/src.tar.gz"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&pypi, "x86_64").as_deref(),
+            Some("https://files.pythonhosted.org/x86.whl")
+        );
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&pypi, "arm64").as_deref(),
+            Some("https://files.pythonhosted.org/arm.whl")
+        );
+        assert_eq!(
+            macos_ffmpeg_wheel_url(&serde_json::json!({}), "x86_64"),
+            None
+        );
+    }
+
+    #[test]
+    fn extracts_ffmpeg_from_the_wheel() {
+        let dir = tmpdir("wheel");
+        let whl = dir.join("ff.whl");
+        {
+            let mut w = zip::ZipWriter::new(File::create(&whl).unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("imageio_ffmpeg/binaries/README.md", opts)
+                .unwrap();
+            w.write_all(b"leggimi").unwrap();
+            w.start_file("imageio_ffmpeg/binaries/ffmpeg-macos-x86_64-v9.0.2", opts)
+                .unwrap();
+            w.write_all(b"ffmpeg finto").unwrap();
+            w.finish().unwrap();
+        }
+        let exe = dir.join("bin").join("ffmpeg");
+        extract_wheel_ffmpeg(&whl, &exe).unwrap();
+        assert_eq!(fs::read(&exe).unwrap(), b"ffmpeg finto");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&exe).unwrap().permissions().mode() & 0o111,
+                0o111
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Con il pacchetto vero scaricato da PyPI:
+    /// GRABBIT_FFMPEG_WHEEL=/percorso/imageio_ffmpeg-…-macosx_10_13_x86_64.whl cargo test real_wheel -- --ignored
+    #[test]
+    #[ignore]
+    fn real_wheel_contains_a_macho_ffmpeg() {
+        let Ok(whl) = std::env::var("GRABBIT_FFMPEG_WHEEL") else {
+            return;
+        };
+        let dir = tmpdir("realwheel");
+        let exe = dir.join("ffmpeg");
+        extract_wheel_ffmpeg(Path::new(&whl), &exe).unwrap();
+        let head = fs::read(&exe).unwrap();
+        assert!(head.len() > 10_000_000);
+        assert_eq!(&head[..4], &[0xcf, 0xfa, 0xed, 0xfe]); // Mach-O 64 bit
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
