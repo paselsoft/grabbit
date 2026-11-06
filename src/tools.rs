@@ -226,6 +226,65 @@ pub fn ensure_ytdlp(status: &mut dyn FnMut(String)) -> Result<String> {
     ))
 }
 
+/// Moduli Python che la versione di yt-dlp per Python non contiene (la versione per Mac
+/// sì): (nome del pacchetto, nome per `import`). mutagen serve a incorporare le copertine
+/// in M4A, MP3 e FLAC (senza, yt-dlp ripiega su ffprobe, che non c'è, e la copertina
+/// resta accanto al brano come file .jpg); requests e brotli rendono le richieste più
+/// efficienti.
+const PYTHON_MODULES: [(&str, &str); 3] = [
+    ("mutagen", "mutagen"),
+    ("requests", "requests"),
+    ("brotli", "brotli"),
+];
+
+/// Se si usa la versione di yt-dlp per Python, installa una volta sola (con pip, nella
+/// cartella dell'utente) i moduli che le mancano. Negli altri casi non fa nulla.
+/// Restituisce un errore solo se manca mutagen, l'unico indispensabile.
+pub fn ensure_python_modules(status: &mut dyn FnMut(String)) -> Result<()> {
+    if !installed_is_python_zipapp() {
+        return Ok(());
+    }
+    let has = |module: &str| {
+        command("python3")
+            .args(["-c", &format!("import {module}")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    for (package, module) in PYTHON_MODULES {
+        if has(module) {
+            continue;
+        }
+        status(tr!(
+            format!("Installo il componente Python «{package}» per yt-dlp…"),
+            format!("Installing the Python component “{package}” for yt-dlp…")
+        ));
+        // un pacchetto alla volta: se uno facoltativo non si installa, gli altri sì;
+        // --only-binary: mai compilare da sorgente (servirebbero gli strumenti di Xcode)
+        let _ = command("python3")
+            .args([
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "--quiet",
+                "--disable-pip-version-check",
+                "--only-binary",
+                ":all:",
+                package,
+            ])
+            .output();
+    }
+    if has("mutagen") {
+        Ok(())
+    } else {
+        bail!(tr!(
+            "installazione di mutagen non riuscita; prova nel Terminale: python3 -m pip install --user mutagen",
+            "mutagen could not be installed; try in Terminal: python3 -m pip install --user mutagen"
+        ))
+    }
+}
+
 // ───────────────────────────── Deno ─────────────────────────────
 
 fn deno_target() -> Option<&'static str> {

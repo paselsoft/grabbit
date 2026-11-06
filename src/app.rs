@@ -245,6 +245,12 @@ impl App {
                 }
             };
             let mut warnings = Vec::new();
+            if let Err(e) = tools::ensure_python_modules(&mut status) {
+                warnings.push(tr!(
+                    format!("componenti Python di yt-dlp non installati ({e:#}): le copertine potrebbero non essere incorporate nei file."),
+                    format!("yt-dlp's Python components are not installed ({e:#}): cover art may not be embedded in the files.")
+                ));
+            }
             let js = tools::ensure_js_runtime(&mut status)
                 .map_err(|e| warnings.push(tr!(format!("Runtime JavaScript (Deno) non disponibile ({e:#}): alcuni video YouTube potrebbero non funzionare."), format!("JavaScript runtime (Deno) is not available ({e:#}): some YouTube videos may not work."))))
                 .ok();
