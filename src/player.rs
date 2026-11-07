@@ -115,6 +115,12 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             }
             album.tracks.push(track);
         }
+        // senza tag: in «Artista/Album» l'artista è il nome della cartella sopra l'album
+        if album.artist.is_empty() && depth == 2 {
+            if let Some(parent) = dir.parent().and_then(|p| p.file_name()) {
+                album.artist = parent.to_string_lossy().into_owned();
+            }
+        }
         sort_tracks(&mut album.tracks);
         album.cover = cover_bytes.and_then(|b| crate::search::decode_cover(&b, cover_px).ok());
         lib.albums.push(album);

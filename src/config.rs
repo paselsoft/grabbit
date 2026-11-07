@@ -39,6 +39,8 @@ pub struct Config {
     pub volume: f32,
     /// non riscaricare i brani che sono già nella cartella (archivio dei download)
     pub skip_downloaded: bool,
+    /// audio in cartelle Artista/Album/01 - Titolo (come iTunes e Plex)
+    pub music_folders: bool,
 }
 
 impl Default for Config {
@@ -67,6 +69,7 @@ impl Default for Config {
             player_dir: None,
             volume: 0.8,
             skip_downloaded: true,
+            music_folders: true,
         }
     }
 }

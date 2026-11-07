@@ -300,12 +300,29 @@ pub fn run(
             )
             .into(),
         ));
-        let Some((title, entries)) = list_playlist(&job, &cfg, &tools, &cancel) else {
+        let Some(Listing {
+            title,
+            entries,
+            info,
+        }) = list_playlist(&job, &cfg, &tools, &cancel)
+        else {
             queue.push(job);
             continue;
         };
         // «Album - Titolo» (così lo chiama YouTube) → «Titolo»
-        let folder = sanitize(&crate::search::clean_name(&title));
+        let album = sanitize(&crate::search::clean_name(&title));
+        let audio = job.audio_only || cfg.mode == Mode::Audio;
+        // musica: un album va in «Artista/Album», con i brani numerati a due cifre
+        let music_album = audio && cfg.music_folders && is_music_album(&job.target, &info);
+        let artist = if music_album {
+            album_artist(&entries, &info).map(|a| sanitize(&a))
+        } else {
+            None
+        };
+        let folder = match &artist {
+            Some(a) if !a.is_empty() && !album.is_empty() => format!("{a}/{album}"),
+            _ => album.clone(),
+        };
         emit(Event::Log(tr!(
             format!(
                 "Playlist «{title}»: {} brani, salvati nella cartella «{folder}»",
@@ -318,9 +335,14 @@ pub fn run(
         )));
         emit(Event::JobRemoved { id: job.id });
         for e in entries {
+            let num = if music_album {
+                format!("{:02}", e.index)
+            } else {
+                e.index.to_string()
+            };
             let j = Job {
                 id: next,
-                out_name: Some(sanitize(&format!("{} - {}", e.index, e.title))),
+                out_name: Some(sanitize(&format!("{num} - {}", e.title))),
                 label: e.title,
                 target: e.url,
                 subdir: (!folder.is_empty()).then(|| folder.clone()),
@@ -433,11 +455,28 @@ struct Entry {
     title: String,
     /// posizione nella playlist (da 1)
     index: usize,
+    /// canale del brano (per gli album di YouTube Music: «Artista - Topic»)
+    channel: Option<String>,
+}
+
+/// Dati della playlist che yt-dlp ripete in ogni riga dell'elenco.
+#[derive(Debug, Default, PartialEq)]
+struct PlaylistInfo {
+    title: Option<String>,
+    id: Option<String>,
+    uploader: Option<String>,
+}
+
+/// Elenco dei brani di una playlist.
+struct Listing {
+    title: String,
+    entries: Vec<Entry>,
+    info: PlaylistInfo,
 }
 
 /// Legge una riga di `--print "%(.{…})j"` dell'elenco di una playlist:
-/// (titolo della playlist, brano).
-fn parse_entry(line: &str, fallback_index: usize) -> Option<(Option<String>, Entry)> {
+/// (dati della playlist, brano).
+fn parse_entry(line: &str, fallback_index: usize) -> Option<(PlaylistInfo, Entry)> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     let text = |k: &str| {
         v.get(k)
@@ -455,18 +494,74 @@ fn parse_entry(line: &str, fallback_index: usize) -> Option<(Option<String>, Ent
         .map(|n| n as usize)
         .unwrap_or(fallback_index);
     let title = text("title").unwrap_or_else(|| url.clone());
-    Some((text("playlist_title"), Entry { url, title, index }))
+    let info = PlaylistInfo {
+        title: text("playlist_title"),
+        id: text("playlist_id"),
+        uploader: text("playlist_uploader").or_else(|| text("playlist_channel")),
+    };
+    let channel = text("channel").or_else(|| text("uploader"));
+    Some((
+        info,
+        Entry {
+            url,
+            title,
+            index,
+            channel,
+        },
+    ))
+}
+
+/// «Artista - Topic» (canale generato da YouTube per un artista) → «Artista».
+fn artist_from_channel(c: &str) -> String {
+    c.trim().trim_end_matches(" - Topic").trim().to_string()
+}
+
+/// Un album di YouTube Music (playlist «OLAK5uy_…» o pagina «browse/MPREb…»), non una
+/// playlist qualsiasi.
+fn is_music_album(target: &str, info: &PlaylistInfo) -> bool {
+    info.id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("OLAK5uy_"))
+        || target.contains("list=OLAK5uy_")
+        || target.contains("/browse/MPREb")
+}
+
+/// L'artista dell'album: il canale di almeno metà dei brani, altrimenti chi ha caricato
+/// la playlist. Brani di artisti diversi senza un autore della playlist: «Artisti vari».
+/// `None` se l'elenco non dice nulla: lo decide yt-dlp brano per brano.
+fn album_artist(entries: &[Entry], info: &PlaylistInfo) -> Option<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for c in entries.iter().filter_map(|e| e.channel.as_deref()) {
+        let a = artist_from_channel(c);
+        if a.is_empty() {
+            continue;
+        }
+        match counts.iter_mut().find(|(x, _)| *x == a) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((a, 1)),
+        }
+    }
+    if let Some((a, n)) = counts.iter().max_by_key(|(_, n)| *n) {
+        if n * 2 >= entries.len() {
+            return Some(a.clone());
+        }
+    }
+    let uploader = info
+        .uploader
+        .as_deref()
+        .map(artist_from_channel)
+        .filter(|u| !u.is_empty());
+    match uploader {
+        Some(u) => Some(u),
+        None if !counts.is_empty() => Some(tr!("Artisti vari", "Various Artists").into()),
+        None => None,
+    }
 }
 
 /// Chiede a yt-dlp l'elenco dei brani della playlist del link (senza scaricarli).
 /// `None` se il link non è una playlist, o se la richiesta non riesce o va in timeout:
 /// in quel caso il link si scarica così com'è, nella cartella scelta.
-fn list_playlist(
-    job: &Job,
-    cfg: &Config,
-    tools: &Toolset,
-    cancel: &AtomicBool,
-) -> Option<(String, Vec<Entry>)> {
+fn list_playlist(job: &Job, cfg: &Config, tools: &Toolset, cancel: &AtomicBool) -> Option<Listing> {
     let mut a: Vec<String> = Vec::new();
     add(
         &mut a,
@@ -476,7 +571,7 @@ fn list_playlist(
             "--no-warnings",
             "--ignore-errors",
             "--print",
-            "%(.{id,url,title,playlist_title,playlist_index})j",
+            "%(.{id,url,title,channel,uploader,playlist_title,playlist_index,playlist_id,playlist_uploader,playlist_channel})j",
         ],
     );
     // stessa scelta del download vero: con "--no-playlist" un link video+lista è un solo video
@@ -527,17 +622,23 @@ fn list_playlist(
         std::thread::sleep(Duration::from_millis(100));
     }
     let out = reader.join().ok()?;
-    let mut title = None;
+    let mut info = PlaylistInfo::default();
     let mut entries = Vec::new();
     for (i, line) in out.lines().enumerate() {
-        if let Some((t, e)) = parse_entry(line, i + 1) {
-            title = title.or(t);
+        if let Some((p, e)) = parse_entry(line, i + 1) {
+            info.title = info.title.or(p.title);
+            info.id = info.id.or(p.id);
+            info.uploader = info.uploader.or(p.uploader);
             entries.push(e);
         }
     }
     // senza titolo di playlist è un video singolo (es. un link video+lista con «--no-playlist»)
-    let title = title?;
-    (!entries.is_empty()).then_some((title, entries))
+    let title = info.title.clone()?;
+    (!entries.is_empty()).then_some(Listing {
+        title,
+        entries,
+        info,
+    })
 }
 
 fn add(a: &mut Vec<String>, items: &[&str]) {
@@ -572,13 +673,25 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     // cartella e nome file
     let mut dir = cfg.out_dir.clone();
     if let Some(sub) = &job.subdir {
-        dir = dir.join(sub);
+        // «Artista/Album»: una cartella dentro l'altra (sanitize toglie le «/» dai nomi)
+        for part in sub.split('/').filter(|p| !p.is_empty()) {
+            dir = dir.join(part);
+        }
     }
     a.push("-P".into());
     a.push(dir.to_string_lossy().into_owned());
     a.push("-o".into());
     a.push(match &job.out_name {
         Some(n) => format!("{n}.%(ext)s"),
+        // musica senza album noto: cartelle dai metadati di yt-dlp (YouTube Music li ha
+        // per ogni brano). Qui le «/» del modello creano le cartelle.
+        None if audio && cfg.music_folders && !(cfg.playlist && job.target.contains("list=")) => {
+            format!(
+                "%(album_artists.0,album_artist,artists.0,artist,creator,uploader|{})s/%(album|{})s/%(track,title).150B.%(ext)s",
+                tr!("Artista sconosciuto", "Unknown Artist"),
+                tr!("Singoli", "Singles"),
+            )
+        }
         // Solo numero d'ordine (se è una playlist) e titolo. La cartella della playlist NON
         // si fa con il modello: yt-dlp trasforma ogni "/" dentro un valore in un carattere
         // innocuo, quindi finirebbe tutto nel nome del file. La sceglie Grabbit (vedi
@@ -1116,22 +1229,192 @@ echo "GRBFILE|/x/$last"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Un album di YouTube Music scaricato come audio va in «Artista/Album/01 - Titolo»;
+    /// una playlist qualsiasi resta nella cartella con il suo nome.
+    #[cfg(unix)]
+    #[test]
+    fn music_albums_go_in_artist_album_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("grabbit-mf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let fake = dir.join("fake-yt-dlp");
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/bin/sh
+last=""; for a in "$@"; do last="$a"; done
+echo "$*" >> "{log}"
+case " $* " in *" --flat-playlist "*)
+  case "$last" in *OLAK5uy_*)
+    for i in 1 2 3; do echo "{{\"id\":\"v$i\",\"url\":\"https://x.test/watch?v=a$i\",\"title\":\"Brano $i\",\"channel\":\"Mina - Topic\",\"playlist_title\":\"Album - Studio Uno\",\"playlist_id\":\"OLAK5uy_x\",\"playlist_index\":$i}}"; done;;
+  *PLmix*)
+    for i in 1 2; do echo "{{\"id\":\"m$i\",\"url\":\"https://x.test/watch?v=m$i\",\"title\":\"Pezzo $i\",\"channel\":\"Canale $i\",\"playlist_title\":\"Estate\",\"playlist_id\":\"PLmix\",\"playlist_index\":$i}}"; done;;
+  esac
+  exit 0;;
+esac
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = Config {
+            mode: Mode::Audio,
+            out_dir: dir.clone(),
+            ..Config::default()
+        };
+        let tools = Toolset {
+            ytdlp: fake,
+            ffmpeg_dir: None,
+            js: None,
+        };
+        run(
+            vec![
+                "https://music.youtube.com/playlist?list=OLAK5uy_x".into(),
+                "https://www.youtube.com/playlist?list=PLmix".into(),
+            ],
+            cfg,
+            tools,
+            0,
+            Arc::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let dl = |url: &str| -> String {
+            calls
+                .lines()
+                .find(|l| !l.contains("--flat-playlist") && l.ends_with(url))
+                .unwrap_or_else(|| panic!("{url} non scaricato:\n{calls}"))
+                .to_string()
+        };
+        let t2 = dl("https://x.test/watch?v=a2");
+        let album_dir = dir.join("Mina").join("Studio Uno");
+        assert!(t2.contains(&album_dir.display().to_string()), "{t2}");
+        assert!(t2.contains("02 - Brano 2.%(ext)s"), "{t2}");
+        let m1 = dl("https://x.test/watch?v=m1");
+        assert!(
+            m1.contains(&dir.join("Estate").display().to_string()),
+            "{m1}"
+        );
+        assert!(m1.contains("1 - Pezzo 1.%(ext)s"), "{m1}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn album_artist_from_the_track_channels() {
+        let e = |c: Option<&str>| Entry {
+            url: String::new(),
+            title: String::new(),
+            index: 1,
+            channel: c.map(String::from),
+        };
+        let none = PlaylistInfo::default();
+        let up = PlaylistInfo {
+            uploader: Some("Francesco Renga - Topic".into()),
+            ..PlaylistInfo::default()
+        };
+        // la maggioranza dei brani, senza « - Topic»
+        assert_eq!(
+            album_artist(
+                &[
+                    e(Some("Mina - Topic")),
+                    e(Some("Mina - Topic")),
+                    e(Some("Celentano"))
+                ],
+                &none
+            ),
+            Some("Mina".into())
+        );
+        // nessun canale: chi ha caricato la playlist
+        assert_eq!(
+            album_artist(&[e(None), e(None)], &up),
+            Some("Francesco Renga".into())
+        );
+        // tutti diversi e nessun autore: artisti vari
+        let various = album_artist(&[e(Some("A")), e(Some("B")), e(Some("C"))], &none).unwrap();
+        assert!(various == "Artisti vari" || various == "Various Artists");
+        // nessuna informazione: decide yt-dlp
+        assert_eq!(album_artist(&[e(None)], &none), None);
+        assert!(is_music_album(
+            "https://music.youtube.com/browse/MPREb_x",
+            &none
+        ));
+        assert!(!is_music_album(
+            "https://www.youtube.com/playlist?list=PL1",
+            &none
+        ));
+    }
+
+    #[test]
+    fn single_songs_use_the_metadata_folders() {
+        let cfg = Config {
+            mode: Mode::Audio,
+            ..Config::default()
+        };
+        let a = build_args(
+            &job("https://music.youtube.com/watch?v=x", None, false),
+            &cfg,
+            &toolset(),
+        );
+        let o = a.iter().position(|x| x == "-o").unwrap();
+        assert!(
+            a[o + 1].starts_with("%(album_artists.0,album_artist,artists.0,artist,"),
+            "{}",
+            a[o + 1]
+        );
+        assert!(a[o + 1].contains("/%(album|"), "{}", a[o + 1]);
+        assert!(
+            a[o + 1].ends_with("/%(track,title).150B.%(ext)s"),
+            "{}",
+            a[o + 1]
+        );
+        // opzione spenta o video: come prima
+        for cfg in [
+            Config {
+                music_folders: false,
+                ..cfg.clone()
+            },
+            Config {
+                mode: Mode::Video,
+                ..cfg.clone()
+            },
+        ] {
+            let a = build_args(
+                &job("https://music.youtube.com/watch?v=x", None, false),
+                &cfg,
+                &toolset(),
+            );
+            assert!(has_pair(
+                &a,
+                "-o",
+                "%(playlist_index&{} - |)s%(title).150B.%(ext)s"
+            ));
+        }
+    }
+
     #[test]
     fn playlist_entries_become_numbered_tracks() {
         let l = r#"{"id": "gVYHLmeHmCc", "url": "https://music.youtube.com/watch?v=gVYHLmeHmCc", "title": "Angelo (VENTI Edition)", "playlist_title": "Album - Scriverò il tuo nome - Live", "playlist_index": 1}"#;
         let (t, e) = parse_entry(l, 9).unwrap();
-        assert_eq!(t.as_deref(), Some("Album - Scriverò il tuo nome - Live"));
+        assert_eq!(
+            t.title.as_deref(),
+            Some("Album - Scriverò il tuo nome - Live")
+        );
         assert_eq!(
             e,
             Entry {
                 url: "https://music.youtube.com/watch?v=gVYHLmeHmCc".into(),
                 title: "Angelo (VENTI Edition)".into(),
-                index: 1
+                index: 1,
+                channel: None,
             }
         );
         // senza url e senza indice: link dall'id, posizione nell'elenco
         let (t, e) = parse_entry(r#"{"id": "abcdefghijk", "title": "X"}"#, 3).unwrap();
-        assert_eq!(t, None);
+        assert_eq!(t, PlaylistInfo::default());
         assert_eq!(e.url, "https://www.youtube.com/watch?v=abcdefghijk");
         assert_eq!(e.index, 3);
         assert!(parse_entry("[youtube:tab] testo", 1).is_none());

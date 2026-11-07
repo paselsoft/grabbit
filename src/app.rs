@@ -1540,6 +1540,11 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                     );
                 });
+                ui.checkbox(&mut self.cfg.music_folders, tr!("Musica in cartelle Artista / Album", "Music in Artist / Album folders"))
+                    .on_hover_text(tr!(
+                        "Solo per l'audio: i brani vanno in Artista/Album/01 - Titolo, come in iTunes e Plex.",
+                        "Audio only: tracks go in Artist/Album/01 - Title, as in iTunes and Plex."
+                    ));
                 ui.checkbox(&mut self.cfg.skip_downloaded, tr!("Salta i brani già scaricati", "Skip tracks already downloaded"))
                     .on_hover_text(tr!(
                         "Un brano già scaricato nello stesso formato non si riscarica, finché il file esiste.",

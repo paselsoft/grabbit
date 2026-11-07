@@ -29,7 +29,8 @@ python3 .claude/skills/ui-snapshot/scripts/snapshot.py --out <cartella-scratchpa
   [--music <cartella con brani>] [--lang it|en] PASSI...
 ```
 
-Passi: `shot:nome`, `click:X,Y`, `wait:secondi`, `key:Return`, `type:testo`.
+Passi: `shot:nome`, `click:X,Y`, `scroll:N` (rotellina dove si trova il mouse), `wait:secondi`,
+`key:Return`, `type:testo`.
 
 - Lo schermo è 1000x1000; la finestra (780x780) è in alto a sinistra. Fai
   sempre prima un `shot:` e leggi le coordinate dall'immagine, poi clicca.

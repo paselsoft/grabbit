@@ -13,6 +13,7 @@ Uso (dalla cartella del repository, dopo `cargo build`):
 Passi, eseguiti in ordine:
     shot:NOME      salva NOME.png (tutto lo schermo 1000x1000; la finestra è in alto a sinistra)
     click:X,Y      sposta il mouse, aspetta, preme e rilascia il tasto sinistro
+    scroll:N       N scatti di rotellina giù dove si trova il mouse (negativo: su)
     wait:SECONDI   aspetta
     key:TASTO      un tasto per xdotool (Return, Escape, ctrl+v, ...)
     type:TESTO     scrive del testo nel campo che ha il focus
@@ -119,6 +120,11 @@ def main() -> int:
                 time.sleep(0.15)
                 x("xdotool", "mouseup", "1")
                 time.sleep(0.8)
+            elif kind == "scroll":
+                # rotellina del mouse dove si trova il puntatore: N scatti giù (negativo: su)
+                n = int(arg)
+                x("xdotool", "click", "--repeat", str(abs(n)), "--delay", "50", "5" if n > 0 else "4")
+                time.sleep(0.6)
             elif kind == "wait":
                 time.sleep(float(arg))
             elif kind == "key":

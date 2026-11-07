@@ -44,9 +44,9 @@ Accettazione:
 - [unit] Un album di YouTube Music (playlist OLAK5uy_) va in «Artista/Album/01 - Titolo», con l'artista senza « - Topic».
 - [unit] Un brano singolo usa i metadati di yt-dlp: «artista/album/titolo», con «Singoli» se manca l'album.
 - [unit] Una playlist che non è un album resta nella cartella con il nome della playlist; i video e l'opzione spenta restano come prima.
-- [snap] «Ascolta» mostra gli album dentro le cartelle degli artisti.
+- [snap] «Ascolta» mostra gli album dentro le cartelle degli artisti, con l'artista preso dalla cartella se i file non hanno il tag.
 - [manual] Sul Mac: scarica un album e un brano da YouTube Music e controlla le cartelle.
 UX:
 - Posto: casella in «Opzioni avanzate», attiva di serie
 - Termini nuovi: Cartelle Artista / Album (Artist / Album folders), Singoli (Singles)
-Stato: in corso
+Stato: fatta (manca la prova [manual] sul Mac)
