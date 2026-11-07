@@ -188,8 +188,8 @@ pub fn ensure_ytdlp(status: &mut dyn FnMut(String)) -> Result<String> {
             if let Ok(latest) = latest_ytdlp_version() {
                 if latest != local {
                     status(tr!(
-                        format!("Aggiorno yt-dlp {local} → {latest}…"),
-                        format!("Updating yt-dlp {local} → {latest}…")
+                        format!("Aggiorno yt-dlp dalla {local} alla {latest}…"),
+                        format!("Updating yt-dlp from {local} to {latest}…")
                     ));
                     install_ytdlp(status)
                         .context(tr!("aggiornamento di yt-dlp", "updating yt-dlp"))?;
@@ -216,8 +216,8 @@ pub fn ensure_ytdlp(status: &mut dyn FnMut(String)) -> Result<String> {
             return Ok(v);
         }
         bail!(tr!(
-            "su questa versione di macOS yt-dlp ha bisogno di Python 3.10 o più recente. Installalo da python.org (Python 3.13, «macOS installer», poi apri «Install Certificates.command» nella cartella Applicazioni → Python 3.13) e premi Riprova.",
-            "on this macOS version yt-dlp needs Python 3.10 or newer. Install it from python.org (Python 3.13, “macOS installer”, then open “Install Certificates.command” in Applications → Python 3.13) and press Retry."
+            "su questa versione di macOS yt-dlp ha bisogno di Python 3.10 o più recente. Installalo da python.org (Python 3.13, «macOS installer», poi apri «Install Certificates.command» nella cartella Applicazioni › Python 3.13) e premi Riprova.",
+            "on this macOS version yt-dlp needs Python 3.10 or newer. Install it from python.org (Python 3.13, “macOS installer”, then open “Install Certificates.command” in Applications › Python 3.13) and press Retry."
         ));
     }
     bail!(tr!(

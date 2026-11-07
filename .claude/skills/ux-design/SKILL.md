@@ -75,7 +75,7 @@ Ogni vista toccata ha parole e aspetto per ogni stato:
   in sola lettura di macOS in `selfupdate.rs`), mai solo il testo tecnico.
 - **Troppo**: nomi lunghi troncati (`Label::truncate`) con il testo intero al
   passaggio del mouse; liste lunghe dentro una `ScrollArea` con altezza massima.
-- **Fatto**: un segno visibile subito («Copiato negli appunti ✓», riga verde).
+- **Fatto**: un segno visibile subito («Copiato negli appunti» in verde, riga verde).
 
 Check: ogni stato ha uno screenshot o dei dati di prova che lo mostrano.
 
@@ -86,8 +86,9 @@ Check: ogni stato ha uno screenshot o dei dati di prova che lo mostrano.
 - I puntini «…» quando il comando chiede altro prima di agire («Sfoglia…»).
 - Errori: cosa è successo e come rimediare, senza colpe e senza gergo.
 - Conferme che ripetono l'azione: «Eliminare 3 brani?» con «Elimina» e «Annulla», mai «Sì» e «No».
-- Simboli: i font di serie di egui non hanno ▶ ⏸ ⏮ ♫ (escono quadratini).
-  Le icone si disegnano con il painter, come `icon_button` in `src/app.rs`.
+- Simboli: i font di serie di egui non hanno → ✓ ⏸ ⏮ (escono quadratini; il test
+  `ui_text_has_no_missing_glyphs` li controlla). Per le frecce usa «›». Le icone
+  si disegnano con il painter, come `icon_button` in `src/app.rs`.
 
 Check: rileggi ogni testo ad alta voce, in tutte e due le lingue.
 
