@@ -197,6 +197,8 @@ pub struct App {
     tab: Tab,
     listen: ListenUi,
     engine: player::Engine,
+    /// porta in vista l'elenco dei download al prossimo disegno («Vedi elenco», avvio)
+    scroll_to_queue: bool,
 }
 
 impl App {
@@ -229,6 +231,7 @@ impl App {
                 let ctx = cc.egui_ctx.clone();
                 player::Engine::start(move || ctx.request_repaint())
             },
+            scroll_to_queue: false,
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -331,6 +334,7 @@ impl App {
         self.cfg.save();
         self.jobs.clear();
         self.running = true;
+        self.scroll_to_queue = true;
         self.cancel.store(false, Ordering::Relaxed);
 
         let toolset = self.toolset();
@@ -658,6 +662,10 @@ impl eframe::App for App {
         let ctx = &ctx;
         // il brano in ascolto resta in basso in tutte e due le schede
         self.now_playing_bar(ui);
+        // «Scarica» e l'avanzamento restano visibili senza scorrere (sopra il player)
+        if self.tab == Tab::Download {
+            self.download_bar(ui, ctx);
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
@@ -677,8 +685,6 @@ impl eframe::App for App {
                             self.link_card(ui);
                             ui.add_space(8.0);
                             self.options_card(ui, ctx);
-                            ui.add_space(10.0);
-                            self.action_row(ui, ctx);
                             ui.add_space(10.0);
                             self.queue(ui);
                             self.log_view(ui, ctx);
@@ -1551,66 +1557,187 @@ impl App {
         });
     }
 
-    fn action_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let has_input = self.input.lines().any(|l| !l.trim().is_empty());
+    /// Barra fissa in basso nella scheda Scarica: «Scarica» con il numero di link, oppure
+    /// «Annulla» con l'avanzamento totale mentre si scarica.
+    fn download_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let links = self.input.lines().filter(|l| !l.trim().is_empty()).count();
         let ready = self.tools.ytdlp.is_some() && !self.tools.busy;
-        ui.horizontal(|ui| {
-            if self.running {
-                let btn = egui::Button::new(RichText::new("   Annulla   ").size(18.0))
-                    .min_size(egui::vec2(0.0, 38.0));
-                if ui.add(btn).clicked() {
-                    self.cancel.store(true, Ordering::Relaxed);
-                }
-                ui.spinner();
-            } else {
-                let enabled = ready && has_input;
-                // attivo: arancione con testo scuro; disattivato: grigio, ben leggibile
-                let (fill, text_color) = if enabled {
-                    (ACCENT, ON_ACCENT)
-                } else {
-                    (
-                        Color32::from_rgb(44, 44, 49),
-                        Color32::from_rgb(130, 130, 138),
-                    )
-                };
-                let btn = egui::Button::new(
-                    RichText::new(tr!("   Scarica   ", "   Download   "))
-                        .size(18.0)
-                        .strong()
-                        .color(text_color),
-                )
-                .fill(fill)
-                .min_size(egui::vec2(0.0, 38.0));
-                // niente add_enabled: egui sfumerebbe ancora il testo; basta non rendere cliccabile il pulsante
-                let btn = btn.sense(if enabled {
-                    egui::Sense::click()
-                } else {
-                    egui::Sense::hover()
+        let total = self.jobs.len();
+        let done = self
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Done)
+            .count();
+        let failed = self
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Failed)
+            .count();
+        egui::Panel::bottom("download_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(28, 28, 31))
+                    .inner_margin(10)
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(52, 52, 57))),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if self.running {
+                        let btn = egui::Button::new(
+                            RichText::new(tr!("   Annulla   ", "   Cancel   ")).size(18.0),
+                        )
+                        .min_size(egui::vec2(0.0, 38.0));
+                        let resp = ui.add(btn);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                true,
+                                tr!("Annulla i download", "Cancel the downloads"),
+                            )
+                        });
+                        if resp.clicked() {
+                            self.cancel.store(true, Ordering::Relaxed);
+                        }
+                    } else {
+                        let enabled = ready && links > 0;
+                        // attivo: arancione con testo scuro; disattivato: grigio, ben leggibile
+                        let (fill, text_color) = if enabled {
+                            (ACCENT, ON_ACCENT)
+                        } else {
+                            (
+                                Color32::from_rgb(44, 44, 49),
+                                Color32::from_rgb(130, 130, 138),
+                            )
+                        };
+                        let btn = egui::Button::new(
+                            RichText::new(tr!("   Scarica   ", "   Download   "))
+                                .size(18.0)
+                                .strong()
+                                .color(text_color),
+                        )
+                        .fill(fill)
+                        .min_size(egui::vec2(0.0, 38.0));
+                        // niente add_enabled: egui sfumerebbe ancora il testo; basta non
+                        // rendere cliccabile il pulsante
+                        let btn = btn.sense(if enabled {
+                            egui::Sense::click()
+                        } else {
+                            egui::Sense::hover()
+                        });
+                        let resp = ui.add(btn);
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                enabled,
+                                tr!("Scarica", "Download"),
+                            )
+                        });
+                        if resp.clicked() {
+                            self.start_download(ctx);
+                        }
+                    }
+                    ui.vertical(|ui| {
+                        let weak = ui.visuals().weak_text_color();
+                        if total == 0 {
+                            let text = match links {
+                                0 => tr!(
+                                    "Nessun link: cerca o incolla un link",
+                                    "No links: search or paste a link"
+                                )
+                                .to_string(),
+                                1 => tr!("1 link pronto", "1 link ready").to_string(),
+                                n => tr!(format!("{n} link pronti"), format!("{n} links ready")),
+                            };
+                            let text = if self.running {
+                                tr!("Preparo i download…", "Preparing the downloads…").into()
+                            } else {
+                                text
+                            };
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(text).color(weak));
+                            return;
+                        }
+                        let running_pct: f32 = self
+                            .jobs
+                            .iter()
+                            .filter(|j| j.state == JobState::Running)
+                            .map(|j| j.pct)
+                            .sum();
+                        let frac = ((done + failed) as f32 + running_pct) / total as f32;
+                        let mut summary = tr!(
+                            format!("{done} di {total} completati"),
+                            format!("{done} of {total} completed")
+                        );
+                        if failed > 0 {
+                            summary.push_str(&tr!(
+                                format!(" · {failed} non riusciti"),
+                                format!(" · {failed} failed")
+                            ));
+                        }
+                        let color = if self.running {
+                            ui.visuals().text_color()
+                        } else if failed > 0 {
+                            ERR
+                        } else {
+                            OK
+                        };
+                        ui.horizontal(|ui| {
+                            if self.running {
+                                ui.spinner();
+                            }
+                            ui.label(RichText::new(summary).color(color));
+                        });
+                        if self.running {
+                            ui.add(
+                                egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                                    .desired_height(8.0)
+                                    .desired_width((ui.available_width() - 200.0).max(80.0)),
+                            );
+                        } else if links > 0 {
+                            ui.label(
+                                RichText::new(match links {
+                                    1 => tr!("1 link pronto", "1 link ready").to_string(),
+                                    n => {
+                                        tr!(format!("{n} link pronti"), format!("{n} links ready"))
+                                    }
+                                })
+                                .small()
+                                .color(weak),
+                            );
+                        }
+                    });
+                    if total > 0 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if !self.running
+                                && ui.button(tr!("Pulisci elenco", "Clear list")).clicked()
+                            {
+                                self.jobs.clear();
+                            }
+                            if ui
+                                .button(tr!("Vedi elenco", "Show list"))
+                                .on_hover_text(tr!(
+                                    "Mostra l'elenco dei download, brano per brano",
+                                    "Show the list of downloads, track by track"
+                                ))
+                                .clicked()
+                            {
+                                self.scroll_to_queue = true;
+                            }
+                        });
+                    }
                 });
-                let resp = ui.add(btn);
-                resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::Role::Button,
-                        enabled,
-                        tr!("Scarica", "Download"),
-                    )
-                });
-                if resp.clicked() {
-                    self.start_download(ctx);
-                }
-                if !self.jobs.is_empty() && ui.button(tr!("Pulisci elenco", "Clear list")).clicked()
-                {
-                    self.jobs.clear();
-                }
-            }
-        });
+            });
     }
 
-    fn queue(&self, ui: &mut egui::Ui) {
+    fn queue(&mut self, ui: &mut egui::Ui) {
         if self.jobs.is_empty() {
             return;
         }
+        let scroll = std::mem::take(&mut self.scroll_to_queue);
         card(ui, |ui| {
+            if scroll {
+                ui.scroll_to_cursor(Some(egui::Align::TOP));
+            }
             ui.label(RichText::new("Download").strong());
             for j in &self.jobs {
                 ui.add_space(4.0);

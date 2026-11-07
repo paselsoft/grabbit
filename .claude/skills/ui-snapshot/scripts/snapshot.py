@@ -90,6 +90,12 @@ def main() -> int:
     def x(*cmd):
         subprocess.run(cmd, env=env, check=True)
 
+    def focus():
+        # senza window manager nessuno dà il focus della tastiera alla finestra:
+        # va dato a mano, altrimenti i tasti si perdono
+        subprocess.run(["xdotool", "search", "--name", "Grabbit", "windowfocus"], env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     xvfb = subprocess.Popen(["Xvfb", a.display, "-screen", "0", "1000x1000x24"], stderr=subprocess.DEVNULL)
     time.sleep(1.5)
     log_path = os.path.join(out, "app.log")
@@ -116,9 +122,11 @@ def main() -> int:
             elif kind == "wait":
                 time.sleep(float(arg))
             elif kind == "key":
+                focus()
                 x("xdotool", "key", arg)
                 time.sleep(0.5)
             elif kind == "type":
+                focus()
                 x("xdotool", "type", "--delay", "40", arg)
                 time.sleep(0.5)
             else:
