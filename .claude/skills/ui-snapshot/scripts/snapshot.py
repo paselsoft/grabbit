@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Avvia Grabbit su uno schermo virtuale (Xvfb), esegue clic e tasti, salva screenshot.
 
-Grabbit non scarica nulla: yt-dlp, Deno e ffmpeg sono script finti, la configurazione e i dati
+Grabbit non scarica nulla: yt-dlp, Deno e ffmpeg sono script finti (un «download» dura 10 s), la configurazione e i dati
 stanno in una cartella temporanea (la tua configurazione vera non viene toccata), l'audio va su
 un'uscita ALSA muta (che suona molto più veloce del tempo reale).
 
@@ -28,7 +28,19 @@ import tempfile
 import time
 
 FAKE_TOOLS = {
-    "yt-dlp": "#!/bin/sh\necho 2026.10.26\n",
+    # --version risponde subito; un «download» dura 10 s con l'avanzamento che legge Grabbit
+    "yt-dlp": """#!/bin/sh
+case " $* " in
+  *" --version "*) echo 2026.10.26; exit 0;;
+  *" --flat-playlist "*) exit 0;;
+esac
+i=0
+while [ $i -le 20 ]; do
+  echo "GRB|$((i * 5))|100|NA|1048576|$((20 - i))|NA|NA|Brano di prova"
+  i=$((i + 1)); sleep 0.5
+done
+echo "GRBFILE|/tmp/Brano di prova.m4a"
+""",
     "deno": "#!/bin/sh\necho deno 2.5.0\n",
     "ffmpeg": "#!/bin/sh\necho ffmpeg\n",
 }

@@ -13,7 +13,7 @@ Come utente, nella scheda Scarica trovo sempre in basso una barra con «Scarica�
 il numero di link pronti e, durante il download, l'avanzamento totale con «Annulla».
 Accettazione:
 - [snap] Con la finestra di serie (780×780) la barra è visibile senza scorrere, con «Scarica» e «Nessun link» o «N link».
-- [snap] Durante un download la barra mostra «Annulla», una barra di avanzamento e «X di N completati».
+- [snap] Durante un download la barra mostra «Annulla», una barra di avanzamento e «X di N completati · 45%»; ogni brano in corso mostra la sua percentuale.
 - [snap] «Vedi elenco» porta l'elenco dei download in vista; la barra non compare nella scheda Ascolta.
 - [ci] cargo clippy e cargo test passano su Linux, Windows e macOS.
 UX:

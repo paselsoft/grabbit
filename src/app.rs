@@ -1685,6 +1685,10 @@ impl App {
                                 format!(" · {failed} failed")
                             ));
                         }
+                        if self.running {
+                            // avanzamento di tutto il download (un album: l'album intero)
+                            summary.push_str(&format!(" · {:.0}%", frac.clamp(0.0, 1.0) * 100.0));
+                        }
                         let color = if self.running {
                             ui.visuals().text_color()
                         } else if failed > 0 {
@@ -1784,7 +1788,20 @@ impl App {
                 if j.state == JobState::Running {
                     ui.add(egui::ProgressBar::new(j.pct).desired_height(8.0));
                 }
-                if !j.detail.is_empty() {
+                if j.state == JobState::Running {
+                    // percentuale del brano davanti a velocità e tempo rimasto
+                    let pct = format!("{:.0}%", j.pct * 100.0);
+                    let text = if j.detail.is_empty() {
+                        pct
+                    } else {
+                        format!("{pct} · {}", j.detail)
+                    };
+                    ui.label(
+                        RichText::new(text)
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                } else if !j.detail.is_empty() {
                     let col = if j.state == JobState::Failed {
                         ERR
                     } else {

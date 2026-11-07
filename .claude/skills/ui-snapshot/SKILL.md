@@ -38,9 +38,9 @@ Passi: `shot:nome`, `click:X,Y`, `scroll:N` (rotellina dove si trova il mouse), 
   scheda «Ascolta» (155,94). Il primo album della libreria è intorno a (150,230),
   le righe successive ogni 67 px.
 - Configurazione, dati e strumenti stanno in una cartella temporanea: la
-  configurazione vera non viene toccata. Ricerca e download non funzionano
-  (yt-dlp è finto e YouTube non è raggiungibile): si provano layout, schede,
-  libreria e player.
+  configurazione vera non viene toccata. La ricerca non funziona (YouTube non è
+  raggiungibile); un download finge di durare 10 s con l'avanzamento, così si
+  vedono barra dei download ed elenco mentre lavorano (scatta 3-4 s dopo «Scarica»).
 - L'audio va su un'uscita ALSA muta che suona molto più veloce del tempo reale:
   un brano di 30 s finisce in un paio di secondi. Per fotografare la barra del
   player usa un brano lungo (un'ora, creato con ffmpeg) o scatta subito dopo il clic.
