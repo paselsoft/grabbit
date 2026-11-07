@@ -501,8 +501,12 @@ impl App {
                 self.update_checking = false;
                 use selfupdate::Check;
                 self.update_status = match result {
-                    Err(e) => tr!(format!("Controllo aggiornamenti non riuscito: {e}"), format!("Update check failed: {e}")),
-                    Ok(Check::NotConfigured) => tr!("Aggiornamenti non attivi: repository GitHub non impostato (campo repository di Cargo.toml)", "Updates are off: GitHub repository not set (repository field in Cargo.toml)").into(),
+                    Err(e) => tr!(
+                        format!("Controllo aggiornamenti non riuscito: {e}"),
+                        format!("Update check failed: {e}")
+                    ),
+                    // build locale senza repository: niente da dire a chi usa l'app
+                    Ok(Check::NotConfigured) => String::new(),
                     Ok(Check::NoRelease) => {
                         let repo = selfupdate::repository().unwrap_or_default();
                         tr!(
@@ -510,9 +514,15 @@ impl App {
                             format!("No release found on GitHub ({repo}). If the repository is private, the app cannot read it.")
                         )
                     }
-                    Ok(Check::UpToDate) => tr!(format!("Grabbit {} è aggiornato", selfupdate::CURRENT), format!("Grabbit {} is up to date", selfupdate::CURRENT)),
+                    Ok(Check::UpToDate) => tr!(
+                        format!("Grabbit {} è aggiornato", selfupdate::CURRENT),
+                        format!("Grabbit {} is up to date", selfupdate::CURRENT)
+                    ),
                     Ok(Check::Newer(rel)) => {
-                        let msg = tr!(format!("Disponibile la versione {}", rel.version), format!("Version {} is available", rel.version));
+                        let msg = tr!(
+                            format!("Disponibile la versione {}", rel.version),
+                            format!("Version {} is available", rel.version)
+                        );
                         if self.cfg.auto_update_app
                             && self.auto_install
                             && selfupdate::supported()
@@ -720,8 +730,8 @@ impl App {
                 ui.label(RichText::new("Grabbit").size(28.0).strong());
                 ui.label(
                     RichText::new(tr!(
-                        "Video e musica da YouTube e Spotify",
-                        "Video and music from YouTube and Spotify"
+                        "Video e musica da YouTube e YouTube Music, anche dai link Spotify",
+                        "Video and music from YouTube and YouTube Music, Spotify links too"
                     ))
                     .color(ui.visuals().weak_text_color()),
                 );
@@ -939,8 +949,8 @@ impl App {
             {
                 ui.label(
                     RichText::new(tr!(
-                        "Per usare il tuo account Google, scegli il browser in cui hai fatto l'accesso in «Opzioni avanzate → Usa i cookie del browser».",
-                        "To use your Google account, pick the browser you are signed in with in “Advanced options → Use browser cookies”."
+                        "Per usare il tuo account Google, scegli il browser in cui hai fatto l'accesso in «Opzioni avanzate › Usa i cookie del browser».",
+                        "To use your Google account, pick the browser you are signed in with in “Advanced options › Use browser cookies”."
                     ))
                     .small()
                     .color(ui.visuals().weak_text_color()),
@@ -1831,7 +1841,7 @@ impl App {
                 if let Some(t) = self.log_copied {
                     if t.elapsed().as_secs() < 3 {
                         ui.label(
-                            RichText::new(tr!("Copiato negli appunti ✓", "Copied to the clipboard ✓"))
+                            RichText::new(tr!("Copiato negli appunti", "Copied to the clipboard"))
                                 .small()
                                 .color(OK),
                         );

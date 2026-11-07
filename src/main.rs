@@ -47,3 +47,33 @@ fn main() -> eframe::Result {
         Box::new(|cc| Ok(Box::new(app::App::new(cc)))),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    /// I font di serie di egui non hanno questi simboli: sullo schermo diventano quadratini.
+    #[test]
+    fn ui_text_has_no_missing_glyphs() {
+        const MISSING: &[char] = &['→', '←', '✓', '✔', '⏸', '⏮', '⏭'];
+        for (name, src) in [
+            ("app.rs", include_str!("app.rs")),
+            ("downloader.rs", include_str!("downloader.rs")),
+            ("player.rs", include_str!("player.rs")),
+            ("search.rs", include_str!("search.rs")),
+            ("selfupdate.rs", include_str!("selfupdate.rs")),
+            ("spotify.rs", include_str!("spotify.rs")),
+            ("tools.rs", include_str!("tools.rs")),
+        ] {
+            for (n, line) in src.lines().enumerate() {
+                // i commenti non vanno sullo schermo
+                let code = line.split("//").next().unwrap_or("");
+                if let Some(c) = code.chars().find(|c| MISSING.contains(c)) {
+                    panic!(
+                        "{name}:{}: «{c}» esce come quadratino: {}",
+                        n + 1,
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+}
