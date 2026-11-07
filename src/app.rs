@@ -341,7 +341,8 @@ impl App {
         let send = self.sender(ctx);
         let emit: Emit = Arc::new(move |e| send(Msg::Dl(e)));
         let (cfg, cancel, base) = (self.cfg.clone(), self.cancel.clone(), self.next_id);
-        thread::spawn(move || downloader::run(inputs, cfg, toolset, base, emit, cancel));
+        let archive = Some(downloader::archive_path());
+        thread::spawn(move || downloader::run(inputs, cfg, toolset, base, emit, cancel, archive));
     }
 
     fn toolset(&self) -> Toolset {
@@ -1539,6 +1540,11 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                     );
                 });
+                ui.checkbox(&mut self.cfg.skip_downloaded, tr!("Salta i brani già scaricati", "Skip tracks already downloaded"))
+                    .on_hover_text(tr!(
+                        "Un brano già scaricato nello stesso formato non si riscarica, finché il file esiste.",
+                        "A track already downloaded in the same format is not downloaded again, as long as the file exists."
+                    ));
                 ui.checkbox(&mut self.cfg.auto_update_app, tr!("Installa automaticamente gli aggiornamenti di Grabbit", "Install Grabbit updates automatically"));
                 ui.horizontal(|ui| {
                     let can_check = !self.update_checking && !matches!(self.update, UpdateUi::Working(_));

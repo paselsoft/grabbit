@@ -112,6 +112,88 @@ fn sanitize(s: &str) -> String {
     cleaned.trim_matches('.').chars().take(150).collect()
 }
 
+/// File dell'archivio dei brani già scaricati.
+pub fn archive_path() -> PathBuf {
+    tools::data_dir().join("downloaded.json")
+}
+
+/// Archivio dei brani già scaricati: per ogni brano (e formato) il file salvato.
+/// Diversamente da `--download-archive` di yt-dlp, un brano conta come già scaricato
+/// solo se il file c'è ancora: se lo cancelli, si riscarica.
+struct Archive {
+    path: Option<PathBuf>,
+    map: std::collections::BTreeMap<String, String>,
+}
+
+impl Archive {
+    fn load(path: Option<PathBuf>) -> Self {
+        let map = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, map }
+    }
+
+    /// Il file già scaricato per questa chiave, se esiste ancora.
+    fn existing(&self, key: &str) -> Option<PathBuf> {
+        let p = PathBuf::from(self.map.get(key)?);
+        p.is_file().then_some(p)
+    }
+
+    fn record(&mut self, key: String, file: String) {
+        self.map.insert(key, file);
+        if let Some(p) = &self.path {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(s) = serde_json::to_string_pretty(&self.map) {
+                let _ = std::fs::write(p, s);
+            }
+        }
+    }
+}
+
+/// Id di un video di YouTube o YouTube Music nel link.
+fn youtube_id(url: &str) -> Option<String> {
+    let u = url.trim();
+    let id = if let Some(i) = u.find("v=").filter(|_| u.contains("youtube.com/watch")) {
+        &u[i + 2..]
+    } else if let Some(i) = u.find("youtu.be/") {
+        &u[i + 9..]
+    } else {
+        let i = u.find("youtube.com/shorts/")?;
+        &u[i + 19..]
+    };
+    let id: String = id
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Chiave dell'archivio: formato scelto + brano. `None` per i link che possono contenere
+/// più brani (playlist, canali), che non si possono saltare in blocco.
+fn archive_key(job: &Job, cfg: &Config) -> Option<String> {
+    let format = if job.audio_only || cfg.mode == Mode::Audio {
+        format!("audio:{}", cfg.audio_format)
+    } else {
+        format!("video:{}:{}", cfg.video_container, cfg.max_height)
+    };
+    let t = job.target.trim();
+    let item = if let Some(q) = t.strip_prefix("ytsearch1:") {
+        // brano Spotify: la ricerca su YouTube identifica il brano
+        format!("search:{}", q.to_lowercase())
+    } else {
+        let id = youtube_id(t)?;
+        if cfg.playlist && t.contains("list=") && job.track.is_none() {
+            return None;
+        }
+        format!("youtube:{id}")
+    };
+    Some(format!("{format}|{item}"))
+}
+
 pub fn run(
     inputs: Vec<String>,
     cfg: Config,
@@ -119,7 +201,9 @@ pub fn run(
     id_base: usize,
     emit: Emit,
     cancel: Arc<AtomicBool>,
+    archive: Option<PathBuf>,
 ) {
+    let archive = std::sync::Mutex::new(Archive::load(archive));
     // 1) trasforma gli input in lavori (i link Spotify diventano ricerche YouTube)
     let mut jobs: Vec<Job> = Vec::new();
     let mut next = id_base;
@@ -290,7 +374,35 @@ pub fn run(
                 } else {
                     emit.clone()
                 };
-                let (ok, detail) = run_job(&job, &cfg, &tools, &job_emit, &cancel);
+                let key = archive_key(&job, &cfg);
+                if cfg.skip_downloaded {
+                    let found = key.as_ref().and_then(|k| archive.lock().ok()?.existing(k));
+                    if let Some(file) = found {
+                        let name = file
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        job_emit(Event::Log(tr!(
+                            format!("Già scaricato, salto: {}", file.display()),
+                            format!("Already downloaded, skipping: {}", file.display())
+                        )));
+                        emit(Event::JobFinished {
+                            id: job.id,
+                            ok: true,
+                            detail: tr!(
+                                format!("Già scaricato · {name}"),
+                                format!("Already downloaded · {name}")
+                            ),
+                        });
+                        continue;
+                    }
+                }
+                let (ok, detail, file) = run_job(&job, &cfg, &tools, &job_emit, &cancel);
+                if let (Some(k), Some(f)) = (key, file) {
+                    if let Ok(mut a) = archive.lock() {
+                        a.record(k, f);
+                    }
+                }
                 emit(Event::JobFinished {
                     id: job.id,
                     ok,
@@ -615,7 +727,7 @@ fn run_job(
     tools: &Toolset,
     emit: &Emit,
     cancel: &Arc<AtomicBool>,
-) -> (bool, String) {
+) -> (bool, String, Option<String>) {
     let args = build_args(job, cfg, tools);
     emit(Event::Log(format!("> {}", job.label)));
 
@@ -633,6 +745,7 @@ fn run_job(
                     format!("impossibile avviare yt-dlp: {e}"),
                     format!("could not start yt-dlp: {e}")
                 ),
+                None,
             )
         }
     };
@@ -731,7 +844,7 @@ fn run_job(
 
     let status = child.wait();
     if cancelled {
-        return (false, tr!("Annullato", "Cancelled").into());
+        return (false, tr!("Annullato", "Cancelled").into(), None);
     }
     let success = status.map(|s| s.success()).unwrap_or(false);
     match (success, files) {
@@ -745,6 +858,8 @@ fn run_job(
             } else {
                 tr!("Completato in parte", "Partially completed")
             };
+            // un solo file salvato e nessun errore: va nell'archivio dei già scaricati
+            let file = (success && files == 1).then(|| last_file.clone());
             (
                 true,
                 if name.is_empty() {
@@ -752,6 +867,7 @@ fn run_job(
                 } else {
                     format!("{note} · {name}")
                 },
+                file,
             )
         }
         _ => (
@@ -763,6 +879,7 @@ fn run_job(
                 )
                 .into()
             }),
+            None,
         ),
     }
 }
@@ -847,6 +964,7 @@ echo "GRBFILE|/x/$last"
             0,
             emit,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         let secs = started.elapsed().as_secs_f32();
         let ev = events.lock().unwrap();
@@ -880,6 +998,120 @@ echo "GRBFILE|/x/$last"
         assert!(
             track3.contains(&dir.join("Disco").display().to_string()),
             "{track3}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Un brano già scaricato non si riscarica, a meno che il file sia sparito, il formato
+    /// sia diverso o l'opzione sia spenta.
+    #[cfg(unix)]
+    #[test]
+    fn already_downloaded_tracks_are_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(format!("grabbit-arc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let calls = dir.join("calls.log");
+        let file = dir.join("Brano.m4a");
+        let fake = dir.join("fake-yt-dlp");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho x >> \"{calls}\"\ntouch \"{file}\"\necho \"GRBFILE|{file}\"\n",
+                calls = calls.display(),
+                file = file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let archive = dir.join("downloaded.json");
+
+        let go = |cfg: Config| -> String {
+            let details = Arc::new(Mutex::new(Vec::<String>::new()));
+            let d = details.clone();
+            let emit: Emit = Arc::new(move |e| {
+                if let Event::JobFinished { ok, detail, .. } = e {
+                    assert!(ok, "{detail}");
+                    d.lock().unwrap().push(detail);
+                }
+            });
+            let tools = Toolset {
+                ytdlp: fake.clone(),
+                ffmpeg_dir: None,
+                js: None,
+            };
+            run(
+                vec!["https://music.youtube.com/watch?v=abc123&si=x".into()],
+                cfg,
+                tools,
+                0,
+                emit,
+                Arc::new(AtomicBool::new(false)),
+                Some(archive.clone()),
+            );
+            let d = details.lock().unwrap();
+            assert_eq!(d.len(), 1);
+            d[0].clone()
+        };
+        let n_calls = || {
+            std::fs::read_to_string(&calls)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        };
+        let audio = |fmt: &str| Config {
+            mode: Mode::Audio,
+            audio_format: fmt.into(),
+            out_dir: dir.clone(),
+            ..Config::default()
+        };
+
+        go(audio("m4a"));
+        assert_eq!(n_calls(), 1);
+        // stesso brano, stesso formato: saltato
+        let d = go(audio("m4a"));
+        assert!(d.contains("Brano.m4a"), "{d}");
+        assert_eq!(n_calls(), 1, "non doveva riscaricare");
+        // un altro link allo stesso video (youtu.be) è lo stesso brano
+        assert_eq!(
+            archive_key(&job("https://youtu.be/abc123", None, false), &audio("m4a")),
+            archive_key(
+                &job("https://www.youtube.com/watch?v=abc123", None, false),
+                &audio("m4a")
+            )
+        );
+        // formato diverso: si scarica
+        go(audio("mp3"));
+        assert_eq!(n_calls(), 2);
+        // opzione spenta: si scarica
+        go(Config {
+            skip_downloaded: false,
+            ..audio("m4a")
+        });
+        assert_eq!(n_calls(), 3);
+        // file cancellato: si riscarica
+        std::fs::remove_file(&file).unwrap();
+        go(audio("m4a"));
+        assert_eq!(n_calls(), 4);
+        // le playlist intere non hanno chiave
+        let cfg = Config {
+            playlist: true,
+            ..audio("m4a")
+        };
+        assert_eq!(
+            archive_key(
+                &job("https://www.youtube.com/watch?v=a&list=PL1", None, false),
+                &cfg
+            ),
+            None
+        );
+        assert_eq!(
+            archive_key(
+                &job("https://www.youtube.com/playlist?list=PL1", None, false),
+                &cfg
+            ),
+            None
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1101,6 +1333,7 @@ echo "GRBFILE|/x/$last"
             0,
             emit,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         let folder = out.join(sanitize(&title));
         let mut names: Vec<String> = std::fs::read_dir(&folder)
@@ -1218,7 +1451,7 @@ echo "GRBFILE|/x/$last"
                 c.store(true, Ordering::Relaxed);
             });
         }
-        run(vec![url], cfg, tools, 0, emit, cancel);
+        run(vec![url], cfg, tools, 0, emit, cancel, None);
         let ev = events.lock().unwrap();
         println!("{}", ev.join("\n"));
         if cancel_after.is_some() {

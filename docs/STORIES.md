@@ -35,7 +35,7 @@ UX:
 - Posto: nella riga del download (cambia lo stato di una riga); l'opzione in «Opzioni avanzate» (di rado)
 - Stati: «Già scaricato · 03 - Titolo.m4a» in verde
 - Termini nuovi: Già scaricato (Already downloaded)
-Stato: in corso
+Stato: fatta (manca la prova [manual] sul Mac)
 
 ### S-003 Salvare la musica in cartelle Artista / Album
 Come utente, quando scarico audio i brani vanno in `Artista/Album/01 - Titolo.m4a`,
