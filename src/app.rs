@@ -1943,6 +1943,8 @@ struct ListenUi {
     last_ended: u64,
     /// posizione trascinata sulla barra, finché non si rilascia
     seek_drag: Option<f32>,
+    /// testo di «Cerca nella libreria»
+    filter: String,
 }
 
 /// Icone dei pulsanti del player, disegnate (i caratteri ▶ ⏸ non ci sono nei font di serie).
@@ -2280,74 +2282,93 @@ impl App {
             ui.add_space(4.0);
             match self.listen.open.filter(|i| *i < lib.albums.len()) {
                 None => {
-                    // elenco degli album
-                    for (i, a) in lib.albums.iter().enumerate() {
-                        let row = ui
-                            .horizontal(|ui| {
-                                cover_box(
-                                    ui,
-                                    self.listen.covers.get(i).and_then(|c| c.as_ref()),
-                                    COVER_LIST,
-                                );
-                                ui.vertical(|ui| {
-                                    ui.add(
-                                        egui::Label::new(RichText::new(&a.name).strong())
-                                            .truncate(),
-                                    );
-                                    let total: Duration =
-                                        a.tracks.iter().filter_map(|t| t.duration).sum();
-                                    let mut meta = Vec::new();
-                                    if !a.artist.is_empty() {
-                                        meta.push(a.artist.clone());
-                                    }
-                                    meta.push(tracks_label(a.tracks.len()));
-                                    if !total.is_zero() {
-                                        meta.push(player::fmt_time(total));
-                                    }
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(meta.join(" · "))
-                                                .small()
-                                                .color(ui.visuals().weak_text_color()),
-                                        )
-                                        .truncate(),
-                                    );
-                                    if self.listen.now.is_some_and(|(na, _)| na == i) {
-                                        ui.label(
-                                            RichText::new(tr!("in ascolto", "now playing"))
-                                                .small()
-                                                .color(ACCENT),
-                                        );
-                                    }
-                                });
-                            })
-                            .response;
-                        let resp = ui
-                            .interact(
-                                row.rect,
-                                ui.scope_id().with(("album", i)),
-                                egui::Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::Role::Button,
-                                true,
-                                format!("{} ({})", a.name, a.artist),
-                            )
+                    // cerca nella libreria: artista, album o brano
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.listen.filter)
+                            .hint_text(tr!(
+                                "Cerca nella libreria: artista, album o brano",
+                                "Search the library: artist, album or track"
+                            ))
+                            .desired_width(f32::INFINITY),
+                    );
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::TextInput,
+                            true,
+                            tr!("Cerca nella libreria", "Search the library"),
+                        )
+                    });
+                    ui.add_space(6.0);
+                    let needle = self.listen.filter.trim().to_lowercase();
+                    let shown: Vec<usize> = (0..lib.albums.len())
+                        .filter(|&i| needle.is_empty() || album_matches(&lib.albums[i], &needle))
+                        .collect();
+                    if shown.is_empty() && !needle.is_empty() {
+                        ui.label(
+                            RichText::new(tr!(
+                                format!(
+                                    "Nessun artista, album o brano con «{}».",
+                                    self.listen.filter.trim()
+                                ),
+                                format!(
+                                    "No artist, album or track matching “{}”.",
+                                    self.listen.filter.trim()
+                                )
+                            ))
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                    // gli album sono già in ordine di artista: un gruppo per artista
+                    let mut k = 0;
+                    while k < shown.len() {
+                        let first = &lib.albums[shown[k]];
+                        let key = (first.loose, first.group.to_lowercase());
+                        let mut end = k;
+                        while end < shown.len() {
+                            let a = &lib.albums[shown[end]];
+                            if (a.loose, a.group.to_lowercase()) != key {
+                                break;
+                            }
+                            end += 1;
+                        }
+                        let group = &shown[k..end];
+                        let title = if first.loose {
+                            tr!("Brani sciolti", "Loose tracks").to_string()
+                        } else if first.group.is_empty() {
+                            tr!("Artista sconosciuto", "Unknown artist").to_string()
+                        } else {
+                            first.group.clone()
+                        };
+                        let count = match group.len() {
+                            1 => tr!("1 uscita", "1 release").to_string(),
+                            n => tr!(format!("{n} uscite"), format!("{n} releases")),
+                        };
+                        let header = egui::CollapsingHeader::new(
+                            RichText::new(format!("{title}  ·  {count}"))
+                                .strong()
+                                .size(16.0),
+                        )
+                        .id_salt(("artist", &key.1, key.0))
+                        .default_open(true);
+                        // mentre si cerca, i gruppi trovati restano aperti
+                        let header = if needle.is_empty() {
+                            header
+                        } else {
+                            header.open(Some(true))
+                        };
+                        header.show(ui, |ui| {
+                            for &i in group {
+                                let a = &lib.albums[i];
+                                let cover = self.listen.covers.get(i).and_then(|c| c.as_ref());
+                                let playing = self.listen.now.is_some_and(|(na, _)| na == i);
+                                if album_row(ui, a, i, cover, playing) {
+                                    open = Some(Some(i));
+                                }
+                                ui.add_space(4.0);
+                            }
                         });
-                        if resp.hovered() {
-                            ui.painter().rect_stroke(
-                                row.rect.expand(3.0),
-                                6,
-                                egui::Stroke::new(1.0, ACCENT_LIGHT),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        if resp.clicked() {
-                            open = Some(Some(i));
-                        }
-                        ui.add_space(4.0);
+                        ui.add_space(2.0);
+                        k = end;
                     }
                 }
                 Some(ai) => {
@@ -2541,6 +2562,16 @@ impl App {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().slider_width = 90.0;
+                        // percentuale a destra del cursore, larga fissa: «100%» non sposta nulla
+                        let pct = format!("{:.0}%", self.cfg.volume.clamp(0.0, 1.0) * 100.0);
+                        ui.add_sized(
+                            [38.0, 18.0],
+                            egui::Label::new(
+                                RichText::new(pct)
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            ),
+                        );
                         let mut vol = self.cfg.volume;
                         let resp = ui
                             .add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false))
@@ -2600,6 +2631,88 @@ impl App {
             None => {}
         }
     }
+}
+
+/// L'album corrisponde alla ricerca (testo già in minuscolo): artista, album o un brano.
+fn album_matches(a: &player::Album, needle: &str) -> bool {
+    a.group.to_lowercase().contains(needle)
+        || a.artist.to_lowercase().contains(needle)
+        || a.name.to_lowercase().contains(needle)
+        || a.tracks
+            .iter()
+            .any(|t| t.title.to_lowercase().contains(needle))
+}
+
+/// Una riga dell'elenco degli album; `true` se è stata cliccata.
+fn album_row(
+    ui: &mut egui::Ui,
+    a: &player::Album,
+    i: usize,
+    cover: Option<&egui::TextureHandle>,
+    playing: bool,
+) -> bool {
+    let row = ui
+        .horizontal(|ui| {
+            cover_box(ui, cover, COVER_LIST);
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(RichText::new(&a.name).strong()).truncate());
+                let total: Duration = a.tracks.iter().filter_map(|t| t.duration).sum();
+                let mut meta = Vec::new();
+                if let Some(y) = a.year {
+                    meta.push(y.to_string());
+                }
+                if a.is_single() && !a.loose {
+                    meta.push(tr!("Singolo", "Single").to_string());
+                }
+                // l'artista solo se dice qualcosa in più del gruppo (duetti, ospiti)
+                if !a.artist.is_empty() && a.artist != a.group {
+                    meta.push(a.artist.clone());
+                }
+                meta.push(tracks_label(a.tracks.len()));
+                if !total.is_zero() {
+                    meta.push(player::fmt_time(total));
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(meta.join(" · "))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    )
+                    .truncate(),
+                );
+                if playing {
+                    ui.label(
+                        RichText::new(tr!("in ascolto", "now playing"))
+                            .small()
+                            .color(ACCENT),
+                    );
+                }
+            });
+        })
+        .response;
+    let resp = ui
+        .interact(
+            row.rect,
+            ui.scope_id().with(("album", i)),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            format!("{} ({})", a.name, a.artist),
+        )
+    });
+    if resp.hovered() {
+        ui.painter().rect_stroke(
+            row.rect.expand(3.0),
+            6,
+            egui::Stroke::new(1.0, ACCENT_LIGHT),
+            egui::StrokeKind::Outside,
+        );
+    }
+    resp.clicked()
 }
 
 /// «1 brano», «12 brani».

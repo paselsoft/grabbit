@@ -50,3 +50,29 @@ UX:
 - Posto: casella in «Opzioni avanzate», attiva di serie
 - Termini nuovi: Cartelle Artista / Album (Artist / Album folders), Singoli (Singles)
 Stato: fatta
+
+## Milestone 2: libreria ordinata in «Ascolta» (0.4.0)
+
+S-004, S-005
+
+### S-004 Vedere la musica raggruppata per artista
+Come utente, in «Ascolta» vedo un gruppo richiudibile per ogni artista, in ordine alfabetico,
+con i suoi album dal più recente e i singoli in fondo, segnati «Singolo».
+Accettazione:
+- [unit] L'artista del gruppo è la cartella dell'artista (`Artista/Album`), altrimenti il primo artista dei tag («Renga Nek, Francesco Renga, Nek» → «Renga Nek»).
+- [unit] Ordine: artisti alfabetici, poi album (più di 3 brani) dal più recente, poi singoli; senza artista e brani sciolti in fondo.
+- [snap] Ogni album mostra anno, «Singolo» se lo è, l'artista solo se diverso dal gruppo, brani e durata.
+- [manual] Sul Mac: la libreria vera appare per artista e i due «Cani Sciolti» si distinguono.
+UX:
+- Posto: nel riquadro di «Ascolta», gruppi richiudibili (`CollapsingHeader`)
+- Termini nuovi: Uscita (Release), Singolo (Single)
+Stato: fatta
+
+### S-005 Cercare nella libreria
+Come utente, scrivo in «Cerca nella libreria» e vedo solo gli artisti, album o brani che contengono il testo.
+Accettazione:
+- [snap] «cani» mostra solo i due «Cani Sciolti», nei loro gruppi aperti.
+- [snap] Nessun risultato: «Nessun artista, album o brano con «…».»
+UX:
+- Posto: campo in cima all'elenco degli album
+Stato: fatta

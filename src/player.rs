@@ -37,6 +37,13 @@ pub struct Track {
 pub struct Album {
     pub name: String,
     pub artist: String,
+    /// artista sotto cui l'album compare in «Ascolta»: la cartella dell'artista
+    /// (`Artista/Album`), altrimenti il primo artista dei tag; vuoto per i brani sciolti
+    pub group: String,
+    /// anno di uscita dai tag (il più vecchio tra i brani)
+    pub year: Option<u32>,
+    /// brani direttamente nella cartella della musica, fuori dagli album
+    pub loose: bool,
     pub tracks: Vec<Track>,
     /// copertina già rimpicciolita: larghezza, altezza, pixel RGBA
     pub cover: Option<(u32, u32, Vec<u8>)>,
@@ -95,6 +102,7 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             continue;
         }
         let mut album = Album {
+            loose: dir == root,
             name: if dir == root {
                 tr!("Brani sciolti", "Loose tracks").into()
             } else {
@@ -110,31 +118,82 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             if album.artist.is_empty() {
                 album.artist = tags.album_artist.or(tags.artist).unwrap_or_default();
             }
+            if let Some(y) = tags.year {
+                album.year = Some(album.year.map_or(y, |a| a.min(y)));
+            }
             if cover_bytes.is_none() {
                 cover_bytes = tags.cover;
             }
             album.tracks.push(track);
         }
-        // senza tag: in «Artista/Album» l'artista è il nome della cartella sopra l'album
-        if album.artist.is_empty() && depth == 2 {
-            if let Some(parent) = dir.parent().and_then(|p| p.file_name()) {
-                album.artist = parent.to_string_lossy().into_owned();
-            }
+        // in «Artista/Album» (e «Artista/Album/CD1») l'artista è la cartella sotto la radice
+        let artist_dir = (depth >= 2)
+            .then(|| dir.strip_prefix(root).ok()?.components().next())
+            .flatten()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned());
+        if album.artist.is_empty() {
+            album.artist = artist_dir.clone().unwrap_or_default();
+        }
+        if !album.loose {
+            album.group = artist_dir.unwrap_or_else(|| primary_artist(&album.artist));
         }
         sort_tracks(&mut album.tracks);
         album.cover = cover_bytes.and_then(|b| crate::search::decode_cover(&b, cover_px).ok());
         lib.albums.push(album);
     }
-    // album in ordine alfabetico, i brani sciolti in fondo
-    let loose = tr!("Brani sciolti", "Loose tracks");
-    lib.albums.sort_by_key(|a| {
+    sort_albums(&mut lib.albums);
+    lib
+}
+
+/// Fino a questo numero di brani un'uscita conta come singolo (o EP breve).
+pub const SINGLE_MAX_TRACKS: usize = 3;
+
+impl Album {
+    pub fn is_single(&self) -> bool {
+        self.tracks.len() <= SINGLE_MAX_TRACKS
+    }
+}
+
+/// Ordine di «Ascolta»: artisti in ordine alfabetico (senza artista e brani sciolti in
+/// fondo); per ogni artista prima gli album poi i singoli, dal più recente.
+fn sort_albums(albums: &mut [Album]) {
+    albums.sort_by_key(|a| {
         (
-            a.name == loose,
+            a.loose,
+            a.group.is_empty(),
+            a.group.to_lowercase(),
+            a.is_single(),
+            std::cmp::Reverse(a.year.unwrap_or(0)),
             a.name.to_lowercase(),
-            a.artist.to_lowercase(),
         )
     });
-    lib
+}
+
+/// Primo artista di «Artista A, Artista B», «A & B», «A feat. B».
+pub fn primary_artist(s: &str) -> String {
+    let mut end = s.len();
+    let lower = s.to_lowercase();
+    for sep in [
+        ", ",
+        " & ",
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " featuring ",
+        " x ",
+        "; ",
+    ] {
+        if let Some(i) = lower.find(sep) {
+            end = end.min(i);
+        }
+    }
+    s[..end].trim().to_string()
+}
+
+/// Anno da una data dei tag: «2019», «2019-05-03», «20230907».
+fn year_of(s: &str) -> Option<u32> {
+    let digits: String = s.trim().chars().take(4).collect();
+    digits.parse().ok().filter(|y| (1900..=2100).contains(y))
 }
 
 /// Ordine dei brani: numero di traccia, poi nome del file.
@@ -148,6 +207,7 @@ fn sort_tracks(tracks: &mut [Track]) {
 #[derive(Default)]
 struct Tags {
     artist: Option<String>,
+    year: Option<u32>,
     album_artist: Option<String>,
     cover: Option<Vec<u8>>,
 }
@@ -230,6 +290,15 @@ fn read_track(path: &Path) -> (Track, Tags) {
                     tags.artist = Some(text);
                 }
                 Some(StandardTagKey::AlbumArtist) => tags.album_artist = Some(text),
+                Some(
+                    StandardTagKey::Date
+                    | StandardTagKey::ReleaseDate
+                    | StandardTagKey::OriginalDate,
+                ) => {
+                    if let Some(y) = year_of(&text) {
+                        tags.year = Some(tags.year.map_or(y, |t| t.min(y)));
+                    }
+                }
                 Some(StandardTagKey::TrackNumber) => {
                     if let Some(n) = leading_number(&text) {
                         track.number = Some(n);
@@ -511,6 +580,53 @@ mod tests {
             .map(|t| t.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["y", "x", "a", "b"]);
+    }
+
+    #[test]
+    fn library_order_and_artists() {
+        assert_eq!(
+            primary_artist("Renga Nek, Francesco Renga, Nek"),
+            "Renga Nek"
+        );
+        assert_eq!(primary_artist("Mina & Celentano"), "Mina");
+        assert_eq!(primary_artist("Adele"), "Adele");
+        assert_eq!(primary_artist("gIANMARIA Feat. Michielin"), "gIANMARIA");
+        assert_eq!(year_of("20230907"), Some(2023));
+        assert_eq!(year_of("2019-05-03"), Some(2019));
+        assert_eq!(year_of("abc"), None);
+        let album = |group: &str, name: &str, year: Option<u32>, n: usize| Album {
+            name: name.into(),
+            group: group.into(),
+            year,
+            tracks: vec![Track::default(); n],
+            ..Album::default()
+        };
+        let mut v = vec![
+            album("Francesco Renga", "Tracce", Some(2002), 11),
+            album("", "Senza artista", None, 5),
+            album("adele", "21", Some(2011), 11),
+            album("Francesco Renga", "Non Dovrei", Some(2024), 1),
+            album("Francesco Renga", "Ferro E Cartone", Some(2019), 11),
+            Album {
+                loose: true,
+                ..album("", "Brani sciolti", None, 2)
+            },
+            album("Adele", "30", Some(2021), 12),
+        ];
+        sort_albums(&mut v);
+        let names: Vec<&str> = v.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "30",
+                "21",
+                "Ferro E Cartone",
+                "Tracce",
+                "Non Dovrei",
+                "Senza artista",
+                "Brani sciolti"
+            ]
+        );
     }
 
     /// Una cartella con un album (sottocartella) e un brano sciolto: WAV generati qui,

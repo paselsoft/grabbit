@@ -749,6 +749,10 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         }
         if cfg.embed_meta {
             add(&mut a, &["--embed-metadata"]);
+            // nei tag la data è quella del caricamento su YouTube: per la musica serve l'anno
+            // di uscita («℗ 2008» nella descrizione dei brani di YouTube Music). Se manca,
+            // yt-dlp avvisa soltanto e resta la data di caricamento.
+            add(&mut a, &["--parse-metadata", "release_year:%(meta_date)s"]);
             if matches!(cfg.audio_format.as_str(), "mp3" | "m4a" | "flac") {
                 add(
                     &mut a,
@@ -1530,6 +1534,12 @@ esac
         assert!(has_pair(&a, "--audio-format", "mp3"));
         assert!(has_pair(&a, "--audio-quality", "320K"));
         assert!(a.contains(&"--embed-thumbnail".to_string()));
+        // anno di uscita, non data di caricamento
+        assert!(has_pair(
+            &a,
+            "--parse-metadata",
+            "release_year:%(meta_date)s"
+        ));
     }
 
     #[test]
