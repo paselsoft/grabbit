@@ -113,19 +113,21 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             ..Album::default()
         };
         let mut cover_bytes: Option<Vec<u8>> = None;
+        let mut years = Vec::new();
         for f in files {
             let (track, tags) = read_track(&f);
             if album.artist.is_empty() {
                 album.artist = tags.album_artist.or(tags.artist).unwrap_or_default();
             }
             if let Some(y) = tags.year {
-                album.year = Some(album.year.map_or(y, |a| a.min(y)));
+                years.push(y);
             }
             if cover_bytes.is_none() {
                 cover_bytes = tags.cover;
             }
             album.tracks.push(track);
         }
+        album.year = album_year(&years);
         // in «Artista/Album» (e «Artista/Album/CD1») l'artista è la cartella sotto la radice
         let artist_dir = (depth >= 2)
             .then(|| dir.strip_prefix(root).ok()?.components().next())
@@ -167,6 +169,16 @@ fn sort_albums(albums: &mut [Album]) {
             a.name.to_lowercase(),
         )
     });
+}
+
+/// Anno dell'album: quello della maggior parte dei brani (un singolo uscito prima non
+/// sposta tutto l'album); a parità, il più recente.
+fn album_year(years: &[u32]) -> Option<u32> {
+    years
+        .iter()
+        .map(|y| (years.iter().filter(|x| *x == y).count(), *y))
+        .max()
+        .map(|(_, y)| y)
 }
 
 /// Primo artista di «Artista A, Artista B», «A & B», «A feat. B».
@@ -594,6 +606,13 @@ mod tests {
         assert_eq!(year_of("20230907"), Some(2023));
         assert_eq!(year_of("2019-05-03"), Some(2019));
         assert_eq!(year_of("abc"), None);
+        assert_eq!(year_of("NA"), None);
+        // «19» di Adele: 11 brani del 2008, «Hometown Glory» uscito come singolo nel 2007
+        let mut y = vec![2008; 11];
+        y.push(2007);
+        assert_eq!(album_year(&y), Some(2008));
+        assert_eq!(album_year(&[2007, 2008]), Some(2008));
+        assert_eq!(album_year(&[]), None);
         let album = |group: &str, name: &str, year: Option<u32>, n: usize| Album {
             name: name.into(),
             group: group.into(),
