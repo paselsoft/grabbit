@@ -29,7 +29,12 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
 - **Playlist**: i file vanno in una cartella con il nome della playlist e si chiamano
   `1 - Titolo.mp4`, `2 - Titolo.mp4`… (senza il nome della playlist nel nome del file).
 - Copertina e metadati incorporati nei file.
-- Coda con avanzamento in tempo reale e pulsante **Annulla**.
+- **Musica in cartelle Artista / Album** (di serie per l'audio, si spegne nelle opzioni avanzate):
+  `Artista/Album/01 - Titolo.m4a`, come in iTunes e Plex; i brani senza album vanno in `Artista/Singoli`.
+- **Niente doppioni**: un brano già scaricato nello stesso formato non si riscarica finché il file
+  esiste; nell'elenco compare «Già scaricato».
+- **Barra dei download** sempre visibile in basso: **Scarica** con il numero di link, oppure
+  **Annulla** con l'avanzamento totale; elenco brano per brano con avanzamento in tempo reale.
 - **Si prepara da solo**: al primo avvio scarica yt-dlp, ffmpeg e Deno
   (il runtime JavaScript che yt-dlp richiede per YouTube); a ogni avvio
   controlla se esiste un yt-dlp più recente e lo aggiorna.

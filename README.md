@@ -29,7 +29,12 @@ The interface is in Italian if your system language is Italian, and in English o
 - **Playlists**: files go into a folder named after the playlist and are called
   `1 - Title.mp4`, `2 - Title.mp4`… (the playlist name is not part of the file name).
 - Cover art and metadata embedded in the files.
-- Queue with live progress and a **Cancel** button.
+- **Music in Artist / Album folders** (on by default for audio, can be turned off in the advanced
+  options): `Artist/Album/01 - Title.m4a`, as in iTunes and Plex; tracks without an album go in `Artist/Singles`.
+- **No duplicates**: a track already downloaded in the same format is not downloaded again as long
+  as the file exists; the list shows "Already downloaded".
+- **Download bar** always visible at the bottom: **Download** with the number of links, or
+  **Cancel** with the overall progress; a track-by-track list with live progress.
 - **Sets itself up**: on first launch it downloads yt-dlp, ffmpeg and Deno
   (the JavaScript runtime yt-dlp needs for YouTube); on every launch it checks
   whether a newer yt-dlp exists and updates it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Avvia Grabbit su uno schermo virtuale (Xvfb), esegue clic e tasti, salva screenshot.
 
-Grabbit non scarica nulla: yt-dlp, Deno e ffmpeg sono script finti, la configurazione e i dati
+Grabbit non scarica nulla: yt-dlp, Deno e ffmpeg sono script finti (un «download» dura 10 s), la configurazione e i dati
 stanno in una cartella temporanea (la tua configurazione vera non viene toccata), l'audio va su
 un'uscita ALSA muta (che suona molto più veloce del tempo reale).
 
@@ -13,6 +13,7 @@ Uso (dalla cartella del repository, dopo `cargo build`):
 Passi, eseguiti in ordine:
     shot:NOME      salva NOME.png (tutto lo schermo 1000x1000; la finestra è in alto a sinistra)
     click:X,Y      sposta il mouse, aspetta, preme e rilascia il tasto sinistro
+    scroll:N       N scatti di rotellina giù dove si trova il mouse (negativo: su)
     wait:SECONDI   aspetta
     key:TASTO      un tasto per xdotool (Return, Escape, ctrl+v, ...)
     type:TESTO     scrive del testo nel campo che ha il focus
@@ -27,7 +28,19 @@ import tempfile
 import time
 
 FAKE_TOOLS = {
-    "yt-dlp": "#!/bin/sh\necho 2026.10.26\n",
+    # --version risponde subito; un «download» dura 10 s con l'avanzamento che legge Grabbit
+    "yt-dlp": """#!/bin/sh
+case " $* " in
+  *" --version "*) echo 2026.10.26; exit 0;;
+  *" --flat-playlist "*) exit 0;;
+esac
+i=0
+while [ $i -le 20 ]; do
+  echo "GRB|$((i * 5))|100|NA|1048576|$((20 - i))|NA|NA|Brano di prova"
+  i=$((i + 1)); sleep 0.5
+done
+echo "GRBFILE|/tmp/Brano di prova.m4a"
+""",
     "deno": "#!/bin/sh\necho deno 2.5.0\n",
     "ffmpeg": "#!/bin/sh\necho ffmpeg\n",
 }
@@ -90,6 +103,12 @@ def main() -> int:
     def x(*cmd):
         subprocess.run(cmd, env=env, check=True)
 
+    def focus():
+        # senza window manager nessuno dà il focus della tastiera alla finestra:
+        # va dato a mano, altrimenti i tasti si perdono
+        subprocess.run(["xdotool", "search", "--name", "Grabbit", "windowfocus"], env=env,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     xvfb = subprocess.Popen(["Xvfb", a.display, "-screen", "0", "1000x1000x24"], stderr=subprocess.DEVNULL)
     time.sleep(1.5)
     log_path = os.path.join(out, "app.log")
@@ -113,12 +132,19 @@ def main() -> int:
                 time.sleep(0.15)
                 x("xdotool", "mouseup", "1")
                 time.sleep(0.8)
+            elif kind == "scroll":
+                # rotellina del mouse dove si trova il puntatore: N scatti giù (negativo: su)
+                n = int(arg)
+                x("xdotool", "click", "--repeat", str(abs(n)), "--delay", "50", "5" if n > 0 else "4")
+                time.sleep(0.6)
             elif kind == "wait":
                 time.sleep(float(arg))
             elif kind == "key":
+                focus()
                 x("xdotool", "key", arg)
                 time.sleep(0.5)
             elif kind == "type":
+                focus()
                 x("xdotool", "type", "--delay", "40", arg)
                 time.sleep(0.5)
             else:
