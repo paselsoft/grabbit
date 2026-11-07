@@ -94,6 +94,9 @@ struct Job {
     audio_only: bool,
     /// numero del brano nell'album: va anche nei metadati del file
     track: Option<usize>,
+    /// cartella dell'artista dai metadati del brano (yt-dlp): `subdir` è allora l'album
+    /// dentro quella cartella
+    artist_from_tags: bool,
 }
 
 /// Toglie i caratteri non ammessi nei nomi file.
@@ -244,6 +247,7 @@ pub fn run(
                             subdir: multi.then(|| sanitize(&col.name)),
                             audio_only: true,
                             track: None,
+                            artist_from_tags: false,
                         });
                         next += 1;
                     }
@@ -270,6 +274,7 @@ pub fn run(
                 subdir: None,
                 audio_only: false,
                 track: None,
+                artist_from_tags: false,
             });
             next += 1;
         }
@@ -319,17 +324,23 @@ pub fn run(
         } else {
             None
         };
+        let artist = artist.filter(|a| !a.is_empty() && !album.is_empty());
         let folder = match &artist {
-            Some(a) if !a.is_empty() && !album.is_empty() => format!("{a}/{album}"),
-            _ => album.clone(),
+            Some(a) => format!("{a}/{album}"),
+            None => album.clone(),
+        };
+        let shown = if music_album && artist.is_none() {
+            tr!(format!("(artista)/{folder}"), format!("(artist)/{folder}"))
+        } else {
+            folder.clone()
         };
         emit(Event::Log(tr!(
             format!(
-                "Playlist «{title}»: {} brani, salvati nella cartella «{folder}»",
+                "Playlist «{title}»: {} brani, salvati nella cartella «{shown}»",
                 entries.len()
             ),
             format!(
-                "Playlist “{title}”: {} tracks, saved in the folder “{folder}”",
+                "Playlist “{title}”: {} tracks, saved in the folder “{shown}”",
                 entries.len()
             )
         )));
@@ -348,6 +359,7 @@ pub fn run(
                 subdir: (!folder.is_empty()).then(|| folder.clone()),
                 audio_only: job.audio_only,
                 track: Some(e.index),
+                artist_from_tags: music_album && artist.is_none(),
             };
             next += 1;
             emit(Event::JobAdded {
@@ -511,11 +523,6 @@ fn parse_entry(line: &str, fallback_index: usize) -> Option<(PlaylistInfo, Entry
     ))
 }
 
-/// «Artista - Topic» (canale generato da YouTube per un artista) → «Artista».
-fn artist_from_channel(c: &str) -> String {
-    c.trim().trim_end_matches(" - Topic").trim().to_string()
-}
-
 /// Un album di YouTube Music (playlist «OLAK5uy_…» o pagina «browse/MPREb…»), non una
 /// playlist qualsiasi.
 fn is_music_album(target: &str, info: &PlaylistInfo) -> bool {
@@ -526,16 +533,23 @@ fn is_music_album(target: &str, info: &PlaylistInfo) -> bool {
         || target.contains("/browse/MPREb")
 }
 
-/// L'artista dell'album: il canale di almeno metà dei brani, altrimenti chi ha caricato
-/// la playlist. Brani di artisti diversi senza un autore della playlist: «Artisti vari».
-/// `None` se l'elenco non dice nulla: lo decide yt-dlp brano per brano.
+/// Canale generato da YouTube per un artista («Artista - Topic»): il suo nome è l'artista.
+/// Gli altri canali sono di chi ha caricato i video («Rengaofficial»), non l'artista.
+fn topic_artist(c: &str) -> Option<String> {
+    let a = c.trim().strip_suffix(" - Topic")?.trim();
+    (!a.is_empty()).then(|| a.to_string())
+}
+
+/// L'artista dell'album dall'elenco dei brani: il canale «Artista - Topic» di almeno metà
+/// dei brani, altrimenti quello della playlist; brani di artisti «Topic» diversi: «Artisti
+/// vari». `None` se l'elenco non lo dice: lo prende yt-dlp dai metadati di ogni brano.
 fn album_artist(entries: &[Entry], info: &PlaylistInfo) -> Option<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for c in entries.iter().filter_map(|e| e.channel.as_deref()) {
-        let a = artist_from_channel(c);
-        if a.is_empty() {
-            continue;
-        }
+    for a in entries
+        .iter()
+        .filter_map(|e| e.channel.as_deref())
+        .filter_map(topic_artist)
+    {
         match counts.iter_mut().find(|(x, _)| *x == a) {
             Some((_, n)) => *n += 1,
             None => counts.push((a, 1)),
@@ -546,14 +560,9 @@ fn album_artist(entries: &[Entry], info: &PlaylistInfo) -> Option<String> {
             return Some(a.clone());
         }
     }
-    let uploader = info
-        .uploader
-        .as_deref()
-        .map(artist_from_channel)
-        .filter(|u| !u.is_empty());
-    match uploader {
+    match info.uploader.as_deref().and_then(topic_artist) {
         Some(u) => Some(u),
-        None if !counts.is_empty() => Some(tr!("Artisti vari", "Various Artists").into()),
+        None if counts.len() > 1 => Some(tr!("Artisti vari", "Various Artists").into()),
         None => None,
     }
 }
@@ -672,7 +681,7 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
 
     // cartella e nome file
     let mut dir = cfg.out_dir.clone();
-    if let Some(sub) = &job.subdir {
+    if let Some(sub) = job.subdir.as_ref().filter(|_| !job.artist_from_tags) {
         // «Artista/Album»: una cartella dentro l'altra (sanitize toglie le «/» dai nomi)
         for part in sub.split('/').filter(|p| !p.is_empty()) {
             dir = dir.join(part);
@@ -681,14 +690,22 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     a.push("-P".into());
     a.push(dir.to_string_lossy().into_owned());
     a.push("-o".into());
+    let artist_tmpl = format!(
+        "%(album_artists.0,artists.0,artist,creator,uploader|{})s",
+        tr!("Artista sconosciuto", "Unknown Artist")
+    );
     a.push(match &job.out_name {
+        // brano di un album con l'artista dai metadati: «Artista/Album/01 - Titolo»
+        Some(n) if job.artist_from_tags => match &job.subdir {
+            Some(album) => format!("{artist_tmpl}/{album}/{n}.%(ext)s"),
+            None => format!("{artist_tmpl}/{n}.%(ext)s"),
+        },
         Some(n) => format!("{n}.%(ext)s"),
         // musica senza album noto: cartelle dai metadati di yt-dlp (YouTube Music li ha
         // per ogni brano). Qui le «/» del modello creano le cartelle.
         None if audio && cfg.music_folders && !(cfg.playlist && job.target.contains("list=")) => {
             format!(
-                "%(album_artists.0,album_artist,artists.0,artist,creator,uploader|{})s/%(album|{})s/%(track,title).150B.%(ext)s",
-                tr!("Artista sconosciuto", "Unknown Artist"),
+                "{artist_tmpl}/%(album|{})s/%(track,title).150B.%(ext)s",
                 tr!("Singoli", "Singles"),
             )
         }
@@ -1010,6 +1027,7 @@ mod tests {
             subdir: None,
             audio_only,
             track: None,
+            artist_from_tags: false,
         }
     }
 
@@ -1247,7 +1265,10 @@ echo "GRBFILE|/x/$last"
 last=""; for a in "$@"; do last="$a"; done
 echo "$*" >> "{log}"
 case " $* " in *" --flat-playlist "*)
-  case "$last" in *OLAK5uy_*)
+  case "$last" in
+  *OLAK5uy_r*)
+    for i in 1 2; do echo "{{\"id\":\"r$i\",\"url\":\"https://x.test/watch?v=r$i\",\"title\":\"Pezzo $i\",\"channel\":\"Rengaofficial\",\"playlist_title\":\"Album - Ferro E Cartone\",\"playlist_id\":\"OLAK5uy_r\",\"playlist_index\":$i}}"; done;;
+  *OLAK5uy_*)
     for i in 1 2 3; do echo "{{\"id\":\"v$i\",\"url\":\"https://x.test/watch?v=a$i\",\"title\":\"Brano $i\",\"channel\":\"Mina - Topic\",\"playlist_title\":\"Album - Studio Uno\",\"playlist_id\":\"OLAK5uy_x\",\"playlist_index\":$i}}"; done;;
   *PLmix*)
     for i in 1 2; do echo "{{\"id\":\"m$i\",\"url\":\"https://x.test/watch?v=m$i\",\"title\":\"Pezzo $i\",\"channel\":\"Canale $i\",\"playlist_title\":\"Estate\",\"playlist_id\":\"PLmix\",\"playlist_index\":$i}}"; done;;
@@ -1274,6 +1295,7 @@ esac
             vec![
                 "https://music.youtube.com/playlist?list=OLAK5uy_x".into(),
                 "https://www.youtube.com/playlist?list=PLmix".into(),
+                "https://music.youtube.com/playlist?list=OLAK5uy_r".into(),
             ],
             cfg,
             tools,
@@ -1294,6 +1316,17 @@ esac
         let album_dir = dir.join("Mina").join("Studio Uno");
         assert!(t2.contains(&album_dir.display().to_string()), "{t2}");
         assert!(t2.contains("02 - Brano 2.%(ext)s"), "{t2}");
+        // canale non «Topic»: l'artista viene dai metadati di yt-dlp, l'album resta quello
+        let r1 = dl("https://x.test/watch?v=r1");
+        assert!(r1.contains(&format!("-P {} ", dir.display())), "{r1}");
+        assert!(
+            r1.contains("%(album_artists.0,artists.0,artist,creator,uploader|"),
+            "{r1}"
+        );
+        assert!(
+            r1.contains(")s/Ferro E Cartone/01 - Pezzo 1.%(ext)s"),
+            "{r1}"
+        );
         let m1 = dl("https://x.test/watch?v=m1");
         assert!(
             m1.contains(&dir.join("Estate").display().to_string()),
@@ -1334,10 +1367,23 @@ esac
             Some("Francesco Renga".into())
         );
         // tutti diversi e nessun autore: artisti vari
-        let various = album_artist(&[e(Some("A")), e(Some("B")), e(Some("C"))], &none).unwrap();
+        let various = album_artist(
+            &[
+                e(Some("A - Topic")),
+                e(Some("B - Topic")),
+                e(Some("C - Topic")),
+            ],
+            &none,
+        )
+        .unwrap();
         assert!(various == "Artisti vari" || various == "Various Artists");
         // nessuna informazione: decide yt-dlp
         assert_eq!(album_artist(&[e(None)], &none), None);
+        // canali di chi ha caricato i video, non dell'artista: decide yt-dlp
+        assert_eq!(
+            album_artist(&[e(Some("Rengaofficial")), e(Some("Rengaofficial"))], &none),
+            None
+        );
         assert!(is_music_album(
             "https://music.youtube.com/browse/MPREb_x",
             &none
@@ -1361,7 +1407,7 @@ esac
         );
         let o = a.iter().position(|x| x == "-o").unwrap();
         assert!(
-            a[o + 1].starts_with("%(album_artists.0,album_artist,artists.0,artist,"),
+            a[o + 1].starts_with("%(album_artists.0,artists.0,artist,"),
             "{}",
             a[o + 1]
         );
