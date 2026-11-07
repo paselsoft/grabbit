@@ -66,7 +66,7 @@ Accettazione:
 UX:
 - Posto: nel riquadro di «Ascolta», gruppi richiudibili (`CollapsingHeader`)
 - Termini nuovi: Uscita (Release), Singolo (Single)
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-005 Cercare nella libreria
 Come utente, scrivo in «Cerca nella libreria» e vedo solo gli artisti, album o brani che contengono il testo.
@@ -75,4 +75,4 @@ Accettazione:
 - [snap] Nessun risultato: «Nessun artista, album o brano con «…».»
 UX:
 - Posto: campo in cima all'elenco degli album
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta

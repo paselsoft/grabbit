@@ -2562,6 +2562,16 @@ impl App {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().slider_width = 90.0;
+                        // percentuale a destra del cursore, larga fissa: «100%» non sposta nulla
+                        let pct = format!("{:.0}%", self.cfg.volume.clamp(0.0, 1.0) * 100.0);
+                        ui.add_sized(
+                            [38.0, 18.0],
+                            egui::Label::new(
+                                RichText::new(pct)
+                                    .small()
+                                    .color(ui.visuals().weak_text_color()),
+                            ),
+                        );
                         let mut vol = self.cfg.volume;
                         let resp = ui
                             .add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false))
