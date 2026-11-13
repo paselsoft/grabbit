@@ -34,6 +34,12 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   `Artista/Album/01 - Titolo.m4a`, come in iTunes e Plex; i brani senza album vanno in `Artista/Singoli`.
 - **Niente doppioni**: un brano già scaricato nello stesso formato non si riscarica finché il file
   esiste; nell'elenco compare «Già scaricato».
+- **Azioni su ogni brano**: «Annulla» mentre scarica, «Mostra nel Finder» quando è finito,
+  «Riprova» se non è riuscito (anche «Riprova i non riusciti» per tutti insieme).
+- **Avviso a fine download**: notifica e icona che saltella nel Dock se Grabbit è in secondo
+  piano; il titolo della finestra mostra la percentuale.
+- **Link copiato**: tornando su Grabbit dopo aver copiato un link YouTube o Spotify, lo propone
+  con «Aggiungi».
 - **Barra dei download** sempre visibile in basso: **Scarica** con il numero di link, oppure
   **Annulla** con l'avanzamento totale; elenco brano per brano con avanzamento in tempo reale.
 - **Si prepara da solo**: al primo avvio scarica yt-dlp, ffmpeg e Deno

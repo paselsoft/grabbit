@@ -1460,6 +1460,7 @@ name = "grabbit"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "arboard",
  "directories",
  "eframe",
  "image",

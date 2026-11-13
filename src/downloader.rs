@@ -35,11 +35,25 @@ pub enum Event {
         id: usize,
         ok: bool,
         detail: String,
+        /// file salvato (o già presente), per «Mostra nel Finder»
+        file: Option<PathBuf>,
+    },
+    /// come scaricare di nuovo il lavoro con «Riprova» (stessa cartella e stesso nome)
+    JobSpec {
+        id: usize,
+        job: Job,
     },
     Finished,
 }
 
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// Lavori da fermare uno per uno (l'«Annulla» di una riga): i loro id.
+pub type StopSet = Arc<std::sync::Mutex<std::collections::HashSet<usize>>>;
+
+fn is_stopped(stop: &StopSet, id: usize) -> bool {
+    stop.lock().map(|s| s.contains(&id)).unwrap_or(false)
+}
 
 /// Runtime JavaScript che yt-dlp usa per risolvere le «sfide» di YouTube:
 /// Deno di solito, QuickJS sui Mac dove Deno non parte (macOS troppo vecchi).
@@ -84,7 +98,9 @@ pub struct Toolset {
     pub js: Option<JsRuntime>,
 }
 
-struct Job {
+/// Un download: un link (o una ricerca), con cartella e nome del file già decisi.
+#[derive(Clone, Debug)]
+pub struct Job {
     id: usize,
     target: String,
     label: String,
@@ -197,6 +213,8 @@ fn archive_key(job: &Job, cfg: &Config) -> Option<String> {
     Some(format!("{format}|{item}"))
 }
 
+// i parametri sono tutti indipendenti: raggrupparli non renderebbe più chiaro nulla
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     inputs: Vec<String>,
     cfg: Config,
@@ -205,8 +223,8 @@ pub fn run(
     emit: Emit,
     cancel: Arc<AtomicBool>,
     archive: Option<PathBuf>,
+    stop: StopSet,
 ) {
-    let archive = std::sync::Mutex::new(Archive::load(archive));
     // 1) trasforma gli input in lavori (i link Spotify diventano ricerche YouTube)
     let mut jobs: Vec<Job> = Vec::new();
     let mut next = id_base;
@@ -261,6 +279,7 @@ pub fn run(
                         id: next,
                         ok: false,
                         detail: format!("Spotify: {e:#}"),
+                        file: None,
                     });
                     next += 1;
                 }
@@ -370,8 +389,42 @@ pub fn run(
         }
     }
 
-    // 3) esegue i lavori, alcuni alla volta: YouTube limita la velocità di ogni singolo
-    //    download, non quella della connessione, quindi in parallelo si fa prima
+    for j in &queue {
+        emit(Event::JobSpec {
+            id: j.id,
+            job: j.clone(),
+        });
+    }
+    execute(queue, &cfg, &tools, &emit, &cancel, archive, &stop);
+    emit(Event::Finished);
+}
+
+/// Scarica di nuovo alcuni lavori già preparati («Riprova»), con le opzioni attuali.
+pub fn retry(
+    jobs: Vec<Job>,
+    cfg: Config,
+    tools: Toolset,
+    emit: Emit,
+    cancel: Arc<AtomicBool>,
+    archive: Option<PathBuf>,
+    stop: StopSet,
+) {
+    execute(jobs, &cfg, &tools, &emit, &cancel, archive, &stop);
+    emit(Event::Finished);
+}
+
+/// Esegue i lavori, alcuni alla volta: YouTube limita la velocità di ogni singolo
+/// download, non quella della connessione, quindi in parallelo si fa prima.
+fn execute(
+    queue: Vec<Job>,
+    cfg: &Config,
+    tools: &Toolset,
+    emit: &Emit,
+    cancel: &Arc<AtomicBool>,
+    archive: Option<PathBuf>,
+    stop: &StopSet,
+) {
+    let archive = std::sync::Mutex::new(Archive::load(archive));
     let workers = (cfg.parallel.clamp(1, 4) as usize).min(queue.len().max(1));
     let tagged = workers > 1;
     let queue = std::sync::Mutex::new(
@@ -388,11 +441,12 @@ pub fn run(
                 let Some((n, job)) = next else {
                     break;
                 };
-                if cancel.load(Ordering::Relaxed) {
+                if cancel.load(Ordering::Relaxed) || is_stopped(stop, job.id) {
                     emit(Event::JobFinished {
                         id: job.id,
                         ok: false,
                         detail: tr!("Annullato", "Cancelled").into(),
+                        file: None,
                     });
                     continue;
                 }
@@ -408,7 +462,7 @@ pub fn run(
                 } else {
                     emit.clone()
                 };
-                let key = archive_key(&job, &cfg);
+                let key = archive_key(&job, cfg);
                 if cfg.skip_downloaded {
                     let found = key.as_ref().and_then(|k| archive.lock().ok()?.existing(k));
                     if let Some(file) = found {
@@ -427,11 +481,12 @@ pub fn run(
                                 format!("Già scaricato · {name}"),
                                 format!("Already downloaded · {name}")
                             ),
+                            file: Some(file),
                         });
                         continue;
                     }
                 }
-                let (ok, detail, file) = run_job(&job, &cfg, &tools, &job_emit, &cancel);
+                let (ok, detail, file, saved) = run_job(&job, cfg, tools, &job_emit, cancel, stop);
                 if let (Some(k), Some(f)) = (key, file) {
                     if let Ok(mut a) = archive.lock() {
                         a.record(k, f);
@@ -441,11 +496,11 @@ pub fn run(
                     id: job.id,
                     ok,
                     detail,
+                    file: saved.map(PathBuf::from),
                 });
             });
         }
     });
-    emit(Event::Finished);
 }
 
 /// Link a un singolo video di YouTube, senza playlist: inutile cercare il titolo di una playlist.
@@ -875,7 +930,8 @@ fn run_job(
     tools: &Toolset,
     emit: &Emit,
     cancel: &Arc<AtomicBool>,
-) -> (bool, String, Option<String>) {
+    stop: &StopSet,
+) -> (bool, String, Option<String>, Option<String>) {
     let args = build_args(job, cfg, tools);
     emit(Event::Log(format!("> {}", job.label)));
 
@@ -893,6 +949,7 @@ fn run_job(
                     format!("impossibile avviare yt-dlp: {e}"),
                     format!("could not start yt-dlp: {e}")
                 ),
+                None,
                 None,
             )
         }
@@ -915,7 +972,7 @@ fn run_job(
     let mut cancelled = false;
 
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) || is_stopped(stop, job.id) {
             terminate(&mut child);
             cancelled = true;
             break;
@@ -992,7 +1049,7 @@ fn run_job(
 
     let status = child.wait();
     if cancelled {
-        return (false, tr!("Annullato", "Cancelled").into(), None);
+        return (false, tr!("Annullato", "Cancelled").into(), None, None);
     }
     let success = status.map(|s| s.success()).unwrap_or(false);
     match (success, files) {
@@ -1008,6 +1065,7 @@ fn run_job(
             };
             // un solo file salvato e nessun errore: va nell'archivio dei già scaricati
             let file = (success && files == 1).then(|| last_file.clone());
+            let saved = (!last_file.is_empty()).then(|| last_file.clone());
             (
                 true,
                 if name.is_empty() {
@@ -1016,6 +1074,7 @@ fn run_job(
                     format!("{note} · {name}")
                 },
                 file,
+                saved,
             )
         }
         _ => (
@@ -1027,6 +1086,7 @@ fn run_job(
                 )
                 .into()
             }),
+            None,
             None,
         ),
     }
@@ -1114,6 +1174,7 @@ echo "GRBFILE|/x/$last"
             emit,
             Arc::new(AtomicBool::new(false)),
             None,
+            StopSet::default(),
         );
         let secs = started.elapsed().as_secs_f32();
         let ev = events.lock().unwrap();
@@ -1198,6 +1259,7 @@ echo "GRBFILE|/x/$last"
                 emit,
                 Arc::new(AtomicBool::new(false)),
                 Some(archive.clone()),
+                StopSet::default(),
             );
             let d = details.lock().unwrap();
             assert_eq!(d.len(), 1);
@@ -1321,6 +1383,7 @@ esac
             Arc::new(|_| {}),
             Arc::new(AtomicBool::new(false)),
             None,
+            StopSet::default(),
         );
         let calls = std::fs::read_to_string(&log).unwrap();
         let dl = |url: &str| -> String {
@@ -1457,6 +1520,95 @@ esac
                 "%(playlist_index&{} - |)s%(title).150B.%(ext)s"
             ));
         }
+    }
+
+    /// «Annulla» su una riga ferma solo quel brano; «Riprova» riscarica il lavoro con la
+    /// stessa cartella e lo stesso nome del file.
+    #[cfg(unix)]
+    #[test]
+    fn single_tracks_can_be_stopped_and_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(format!("grabbit-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let fake = dir.join("fake-yt-dlp");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nlast=\"\"; for a in \"$@\"; do last=\"$a\"; done\necho \"$*\" >> \"{}\"\necho \"GRBFILE|/x/$last\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = Toolset {
+            ytdlp: fake,
+            ffmpeg_dir: None,
+            js: None,
+        };
+        let cfg = Config {
+            mode: Mode::Audio,
+            out_dir: dir.clone(),
+            parallel: 1,
+            ..Config::default()
+        };
+        let finished = Arc::new(Mutex::new(Vec::<(usize, bool, String)>::new()));
+        let specs = Arc::new(Mutex::new(Vec::<Job>::new()));
+        let (f, sp) = (finished.clone(), specs.clone());
+        let emit: Emit = Arc::new(move |e| match e {
+            Event::JobFinished { id, ok, detail, .. } => f.lock().unwrap().push((id, ok, detail)),
+            Event::JobSpec { job, .. } => sp.lock().unwrap().push(job),
+            _ => {}
+        });
+        // il secondo link (id 1) è fermato prima di partire
+        let stop: StopSet = Default::default();
+        stop.lock().unwrap().insert(1);
+        run(
+            vec!["https://youtu.be/aaa".into(), "https://youtu.be/bbb".into()],
+            cfg.clone(),
+            tools.clone(),
+            0,
+            emit.clone(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            stop,
+        );
+        let calls = || std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(calls().lines().count(), 1, "{}", calls());
+        assert!(calls().contains("youtu.be/aaa"));
+        {
+            let f = finished.lock().unwrap();
+            assert!(f.iter().any(|x| x.0 == 0 && x.1), "{f:?}");
+            assert!(f.iter().any(|x| x.0 == 1 && !x.1), "{f:?}");
+        }
+        // «Riprova» sul brano fermato: lo stesso lavoro, con lo stesso id
+        let spec = specs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|j| j.id == 1)
+            .cloned()
+            .unwrap();
+        retry(
+            vec![spec],
+            cfg,
+            tools,
+            emit,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Default::default(),
+        );
+        assert_eq!(calls().lines().count(), 2);
+        assert!(calls().lines().nth(1).unwrap().ends_with("youtu.be/bbb"));
+        assert!(finished
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|x| x.0 == 1)
+            .any(|x| x.1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1686,6 +1838,7 @@ esac
             emit,
             Arc::new(AtomicBool::new(false)),
             None,
+            StopSet::default(),
         );
         let folder = out.join(sanitize(&title));
         let mut names: Vec<String> = std::fs::read_dir(&folder)
@@ -1789,6 +1942,7 @@ esac
                 Event::JobProgress { pct, detail, .. } => format!("progress: {pct:.2} {detail}"),
                 Event::JobFinished { ok, detail, .. } => format!("finished: {ok} {detail}"),
                 Event::JobRemoved { .. } => "removed".into(),
+                Event::JobSpec { .. } => "spec".into(),
                 Event::Finished => "done".into(),
             })
         });
@@ -1803,7 +1957,16 @@ esac
                 c.store(true, Ordering::Relaxed);
             });
         }
-        run(vec![url], cfg, tools, 0, emit, cancel, None);
+        run(
+            vec![url],
+            cfg,
+            tools,
+            0,
+            emit,
+            cancel,
+            None,
+            StopSet::default(),
+        );
         let ev = events.lock().unwrap();
         println!("{}", ev.join("\n"));
         if cancel_after.is_some() {

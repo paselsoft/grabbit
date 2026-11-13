@@ -13,6 +13,7 @@ Uso (dalla cartella del repository, dopo `cargo build`):
 Passi, eseguiti in ordine:
     shot:NOME      salva NOME.png (tutto lo schermo 1000x1000; la finestra è in alto a sinistra)
     click:X,Y      sposta il mouse, aspetta, preme e rilascia il tasto sinistro
+    clip:TESTO     mette TESTO negli appunti (serve xclip)
     scroll:N       N scatti di rotellina giù dove si trova il mouse (negativo: su)
     wait:SECONDI   aspetta
     key:TASTO      un tasto per xdotool (Return, Escape, ctrl+v, ...)
@@ -132,6 +133,11 @@ def main() -> int:
                 time.sleep(0.15)
                 x("xdotool", "mouseup", "1")
                 time.sleep(0.8)
+            elif kind == "clip":
+                # mette TESTO negli appunti (serve xclip); il focus che torna alla finestra con
+                # il passo successivo (key:, type:) è come tornare su Grabbit dal browser
+                subprocess.run(["xclip", "-selection", "clipboard"], input=arg.encode(), env=env, check=True)
+                time.sleep(0.3)
             elif kind == "scroll":
                 # rotellina del mouse dove si trova il puntatore: N scatti giù (negativo: su)
                 n = int(arg)

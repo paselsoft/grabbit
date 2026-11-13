@@ -34,6 +34,12 @@ The interface is in Italian if your system language is Italian, and in English o
   options): `Artist/Album/01 - Title.m4a`, as in iTunes and Plex; tracks without an album go in `Artist/Singles`.
 - **No duplicates**: a track already downloaded in the same format is not downloaded again as long
   as the file exists; the list shows "Already downloaded".
+- **Actions on each track**: "Cancel" while downloading, "Show in Finder" when done, "Retry"
+  when it failed (and "Retry the failed ones" for all of them at once).
+- **Notice when downloads finish**: a notification and a bouncing Dock icon when Grabbit is in
+  the background; the window title shows the percentage.
+- **Copied link**: back on Grabbit after copying a YouTube or Spotify link, it offers it with
+  "Add".
 - **Download bar** always visible at the bottom: **Download** with the number of links, or
   **Cancel** with the overall progress; a track-by-track list with live progress.
 - **Sets itself up**: on first launch it downloads yt-dlp, ffmpeg and Deno

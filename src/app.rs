@@ -108,6 +108,10 @@ struct JobUi {
     pct: f32,
     detail: String,
     state: JobState,
+    /// come riscaricarlo con «Riprova»
+    spec: Option<downloader::Job>,
+    /// file salvato, per «Mostra nel Finder»
+    file: Option<PathBuf>,
 }
 
 enum UpdateUi {
@@ -199,6 +203,16 @@ pub struct App {
     engine: player::Engine,
     /// porta in vista l'elenco dei download al prossimo disegno («Vedi elenco», avvio)
     scroll_to_queue: bool,
+    /// brani da fermare uno per uno («Annulla» sulla riga)
+    stop: downloader::StopSet,
+    /// titolo della finestra mostrato per ultimo (con l'avanzamento durante i download)
+    title: String,
+    /// la finestra aveva il focus al disegno precedente (per accorgersi del ritorno)
+    was_focused: bool,
+    /// ultimo testo degli appunti già esaminato: lo stesso link non si propone due volte
+    clip_seen: String,
+    /// link appena copiato, proposto con «Aggiungi»
+    clip_offer: Option<String>,
 }
 
 impl App {
@@ -232,6 +246,11 @@ impl App {
                 player::Engine::start(move || ctx.request_repaint())
             },
             scroll_to_queue: false,
+            stop: Default::default(),
+            title: String::new(),
+            was_focused: false,
+            clip_seen: String::new(),
+            clip_offer: None,
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -336,13 +355,51 @@ impl App {
         self.running = true;
         self.scroll_to_queue = true;
         self.cancel.store(false, Ordering::Relaxed);
+        if let Ok(mut s) = self.stop.lock() {
+            s.clear();
+        }
 
         let toolset = self.toolset();
         let send = self.sender(ctx);
         let emit: Emit = Arc::new(move |e| send(Msg::Dl(e)));
         let (cfg, cancel, base) = (self.cfg.clone(), self.cancel.clone(), self.next_id);
         let archive = Some(downloader::archive_path());
-        thread::spawn(move || downloader::run(inputs, cfg, toolset, base, emit, cancel, archive));
+        let stop = self.stop.clone();
+        thread::spawn(move || {
+            downloader::run(inputs, cfg, toolset, base, emit, cancel, archive, stop)
+        });
+    }
+
+    /// Riscarica i brani non riusciti indicati, nelle loro righe dell'elenco.
+    fn retry_jobs(&mut self, ctx: &egui::Context, ids: &[usize]) {
+        if self.running {
+            return;
+        }
+        let mut specs = Vec::new();
+        for j in self.jobs.iter_mut() {
+            if ids.contains(&j.id) && j.state == JobState::Failed {
+                if let Some(spec) = &j.spec {
+                    specs.push(spec.clone());
+                    j.state = JobState::Waiting;
+                    j.pct = 0.0;
+                    j.detail.clear();
+                }
+            }
+        }
+        if specs.is_empty() {
+            return;
+        }
+        self.running = true;
+        self.cancel.store(false, Ordering::Relaxed);
+        if let Ok(mut s) = self.stop.lock() {
+            s.clear();
+        }
+        let toolset = self.toolset();
+        let send = self.sender(ctx);
+        let emit: Emit = Arc::new(move |e| send(Msg::Dl(e)));
+        let (cfg, cancel, stop) = (self.cfg.clone(), self.cancel.clone(), self.stop.clone());
+        let archive = Some(downloader::archive_path());
+        thread::spawn(move || downloader::retry(specs, cfg, toolset, emit, cancel, archive, stop));
     }
 
     fn toolset(&self) -> Toolset {
@@ -628,6 +685,8 @@ impl App {
                         pct: 0.0,
                         detail: String::new(),
                         state: JobState::Waiting,
+                        spec: None,
+                        file: None,
                     });
                 }
                 Event::JobRemoved { id } => self.jobs.retain(|j| j.id != id),
@@ -643,15 +702,27 @@ impl App {
                         j.detail = detail;
                     }
                 }
-                Event::JobFinished { id, ok, detail } => {
+                Event::JobFinished {
+                    id,
+                    ok,
+                    detail,
+                    file,
+                } => {
                     if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
                         j.state = if ok { JobState::Done } else { JobState::Failed };
                         j.pct = if ok { 1.0 } else { j.pct };
                         j.detail = detail;
+                        j.file = file;
+                    }
+                }
+                Event::JobSpec { id, job } => {
+                    if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) {
+                        j.spec = Some(job);
                     }
                 }
                 Event::Finished => {
                     self.running = false;
+                    self.notify_finished(ctx);
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
                 }
@@ -666,6 +737,8 @@ impl eframe::App for App {
             self.handle(m, ctx);
         }
         self.player_tick(ctx);
+        self.update_title(ctx);
+        self.check_clipboard(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1330,6 +1403,34 @@ impl App {
                     self.input.clear();
                 }
             });
+            if let Some(link) = self.clip_offer.clone() {
+                let mut close = false;
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(tr!("Hai copiato un link:", "You copied a link:"))
+                            .color(ACCENT_LIGHT),
+                    );
+                    let w = (ui.available_width() - 200.0).max(60.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, 18.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_max_width(w);
+                            ui.add(egui::Label::new(RichText::new(&link).small()).truncate());
+                        },
+                    );
+                    if ui.small_button(tr!("Aggiungi", "Add")).clicked() {
+                        self.append_links(std::slice::from_ref(&link));
+                        close = true;
+                    }
+                    if ui.small_button(tr!("No, grazie", "No, thanks")).clicked() {
+                        close = true;
+                    }
+                });
+                if close {
+                    self.clip_offer = None;
+                }
+            }
             let resp = ui.add(
                 egui::TextEdit::multiline(&mut self.input)
                     .id(field_id)
@@ -1738,6 +1839,21 @@ impl App {
                             {
                                 self.jobs.clear();
                             }
+                            let retryable: Vec<usize> = self
+                                .jobs
+                                .iter()
+                                .filter(|j| j.state == JobState::Failed && j.spec.is_some())
+                                .map(|j| j.id)
+                                .collect();
+                            if !self.running && !retryable.is_empty() {
+                                let label = tr!(
+                                    format!("Riprova i non riusciti ({})", retryable.len()),
+                                    format!("Retry the failed ones ({})", retryable.len())
+                                );
+                                if ui.button(label).clicked() {
+                                    self.retry_jobs(ctx, &retryable);
+                                }
+                            }
                             if ui
                                 .button(tr!("Vedi elenco", "Show list"))
                                 .on_hover_text(tr!(
@@ -1759,6 +1875,8 @@ impl App {
             return;
         }
         let scroll = std::mem::take(&mut self.scroll_to_queue);
+        let mut stop: Vec<usize> = Vec::new();
+        let mut retry: Vec<usize> = Vec::new();
         card(ui, |ui| {
             if scroll {
                 ui.scroll_to_cursor(Some(egui::Align::TOP));
@@ -1798,29 +1916,157 @@ impl App {
                 if j.state == JobState::Running {
                     ui.add(egui::ProgressBar::new(j.pct).desired_height(8.0));
                 }
-                if j.state == JobState::Running {
-                    // percentuale del brano davanti a velocità e tempo rimasto
-                    let pct = format!("{:.0}%", j.pct * 100.0);
-                    let text = if j.detail.is_empty() {
-                        pct
-                    } else {
-                        format!("{pct} · {}", j.detail)
-                    };
-                    ui.label(
-                        RichText::new(text)
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                } else if !j.detail.is_empty() {
-                    let col = if j.state == JobState::Failed {
-                        ERR
-                    } else {
-                        ui.visuals().weak_text_color()
-                    };
-                    ui.label(RichText::new(&j.detail).small().color(col));
-                }
+                // seconda riga: stato a parole e l'azione possibile su quel brano
+                ui.horizontal(|ui| {
+                    if j.state == JobState::Running {
+                        // percentuale del brano davanti a velocità e tempo rimasto
+                        let pct = format!("{:.0}%", j.pct * 100.0);
+                        let text = if j.detail.is_empty() {
+                            pct
+                        } else {
+                            format!("{pct} · {}", j.detail)
+                        };
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    } else if !j.detail.is_empty() {
+                        let col = if j.state == JobState::Failed {
+                            ERR
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        ui.label(RichText::new(&j.detail).small().color(col));
+                    }
+                    let busy = matches!(j.state, JobState::Running | JobState::Waiting);
+                    if busy && self.running {
+                        if ui
+                            .small_button(tr!("Annulla", "Cancel"))
+                            .on_hover_text(tr!("Ferma solo questo brano", "Stop only this track"))
+                            .clicked()
+                        {
+                            stop.push(j.id);
+                        }
+                    } else if j.state == JobState::Done {
+                        if let Some(f) = &j.file {
+                            if ui
+                                .small_button(reveal_label())
+                                .on_hover_text(f.display().to_string())
+                                .clicked()
+                            {
+                                reveal(f);
+                            }
+                        }
+                    } else if j.state == JobState::Failed
+                        && !self.running
+                        && j.spec.is_some()
+                        && ui
+                            .small_button(tr!("Riprova", "Retry"))
+                            .on_hover_text(tr!(
+                                "Scarica di nuovo solo questo brano",
+                                "Download only this track again"
+                            ))
+                            .clicked()
+                    {
+                        retry.push(j.id);
+                    }
+                });
             }
         });
+        if !stop.is_empty() {
+            if let Ok(mut s) = self.stop.lock() {
+                s.extend(stop);
+            }
+        }
+        if !retry.is_empty() {
+            let ctx = ui.ctx().clone();
+            self.retry_jobs(&ctx, &retry);
+        }
+    }
+
+    /// A fine download, con la finestra in secondo piano: notifica di sistema e richiamo
+    /// dell'attenzione (icona che saltella nel Dock, pulsante che lampeggia nella barra).
+    fn notify_finished(&mut self, ctx: &egui::Context) {
+        if self.jobs.is_empty() || ctx.input(|i| i.viewport().focused).unwrap_or(true) {
+            return;
+        }
+        let done = self
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Done)
+            .count();
+        let failed = self
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Failed)
+            .count();
+        let body = if failed == 0 {
+            tr!(
+                format!("Download finito: {done} scaricati"),
+                format!("Downloads finished: {done} downloaded")
+            )
+        } else {
+            tr!(
+                format!("Download finito: {done} scaricati, {failed} non riusciti"),
+                format!("Downloads finished: {done} downloaded, {failed} failed")
+            )
+        };
+        notify("Grabbit", &body);
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+    }
+
+    /// Titolo della finestra: «Grabbit — 45%» mentre scarica, visibile anche da coperta.
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = if self.running && !self.jobs.is_empty() {
+            let total = self.jobs.len() as f32;
+            let sum: f32 = self
+                .jobs
+                .iter()
+                .map(|j| match j.state {
+                    JobState::Done | JobState::Failed => 1.0,
+                    JobState::Running => j.pct,
+                    JobState::Waiting => 0.0,
+                })
+                .sum();
+            format!("Grabbit — {:.0}%", (sum / total).clamp(0.0, 1.0) * 100.0)
+        } else {
+            "Grabbit".to_string()
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+    }
+
+    /// Al ritorno sulla finestra: se negli appunti c'è un link nuovo, lo propone.
+    fn check_clipboard(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+        let gained = focused && !self.was_focused;
+        self.was_focused = focused;
+        if !gained {
+            return;
+        }
+        let Some(text) = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut c| c.get_text().ok())
+        else {
+            return;
+        };
+        if text == self.clip_seen {
+            return;
+        }
+        self.clip_seen = text.clone();
+        let Some(link) = copied_link(&text) else {
+            return;
+        };
+        if self.input.lines().any(|l| l.trim() == link) {
+            return;
+        }
+        self.clip_offer = Some(link);
+        ctx.request_repaint();
     }
 
     fn log_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -2780,6 +3026,70 @@ fn loc(label: &'static str) -> &'static str {
     }
 }
 
+/// Testo del pulsante che mostra un file nella sua cartella.
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr!("Mostra nel Finder", "Show in Finder")
+    } else if cfg!(windows) {
+        tr!("Mostra in Esplora file", "Show in File Explorer")
+    } else {
+        tr!("Apri la cartella", "Open the folder")
+    }
+}
+
+/// Apre la cartella del file con il file selezionato (su Linux solo la cartella).
+fn reveal(file: &std::path::Path) {
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(file)
+            .spawn();
+    } else if cfg!(windows) {
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(file);
+        let _ = std::process::Command::new("explorer").arg(arg).spawn();
+    } else if let Some(dir) = file.parent() {
+        open_folder(dir);
+    }
+}
+
+/// Testo tra virgolette per AppleScript.
+fn applescript_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Notifica di sistema (macOS e Linux; su Windows basta il pulsante che lampeggia).
+fn notify(title: &str, body: &str) {
+    if cfg!(target_os = "macos") {
+        let script = format!(
+            "display notification {} with title {}",
+            applescript_quote(body),
+            applescript_quote(title)
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn();
+    } else if cfg!(target_os = "linux") {
+        let _ = std::process::Command::new("notify-send")
+            .arg(title)
+            .arg(body)
+            .spawn();
+    }
+}
+
+/// Il link negli appunti, se è un solo link YouTube, YouTube Music o Spotify.
+fn copied_link(text: &str) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() || t.contains(char::is_whitespace) || !t.starts_with("http") {
+        return None;
+    }
+    let l = t.to_lowercase();
+    let ok =
+        l.contains("youtube.com/") || l.contains("youtu.be/") || l.contains("open.spotify.com/");
+    ok.then(|| t.to_string())
+}
+
 fn open_folder(p: &std::path::Path) {
     let cmd = if cfg!(windows) {
         "explorer"
@@ -2875,4 +3185,31 @@ fn configure_style(ctx: &egui::Context) {
         v.widgets.active.corner_radius = r;
         v.widgets.open.corner_radius = r;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_links_are_recognised() {
+        let yt = "https://music.youtube.com/playlist?list=OLAK5uy_x";
+        assert_eq!(copied_link(&format!("  {yt}\n")), Some(yt.to_string()));
+        assert!(copied_link("https://youtu.be/abc").is_some());
+        assert!(copied_link("https://open.spotify.com/album/1").is_some());
+        // testo qualsiasi, altri siti o più link insieme: niente proposta
+        assert_eq!(copied_link("ciao a tutti"), None);
+        assert_eq!(copied_link("https://example.com/video"), None);
+        assert_eq!(copied_link("https://youtu.be/a https://youtu.be/b"), None);
+        assert_eq!(copied_link(""), None);
+    }
+
+    #[test]
+    fn notification_text_is_quoted_for_applescript() {
+        assert_eq!(
+            applescript_quote("Brano \"live\""),
+            "\"Brano \\\"live\\\"\""
+        );
+        assert_eq!(applescript_quote("a\\b"), "\"a\\\\b\"");
+    }
 }
