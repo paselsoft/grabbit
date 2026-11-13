@@ -650,6 +650,10 @@ fn list_playlist(job: &Job, cfg: &Config, tools: &Toolset, cancel: &AtomicBool) 
     })
 }
 
+/// Copertina quadrata nei file audio: la miniatura di YouTube è 16:9 con la copertina al
+/// centro e bande ai lati; ffmpeg tiene il quadrato centrale mentre la converte in JPEG.
+const SQUARE_COVER: &str = "ThumbnailsConvertor+FFmpeg_o:-c:v mjpeg -qmin 1 -qscale:v 1 -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"";
+
 /// Anno di uscita nei tag dell'audio (vedi `build_args`).
 const RELEASE_YEAR: &str = "%(release_date>%Y,release_year|)s:%(meta_date)s";
 
@@ -760,7 +764,13 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
             if matches!(cfg.audio_format.as_str(), "mp3" | "m4a" | "flac") {
                 add(
                     &mut a,
-                    &["--embed-thumbnail", "--convert-thumbnails", "jpg"],
+                    &[
+                        "--embed-thumbnail",
+                        "--convert-thumbnails",
+                        "jpg",
+                        "--ppa",
+                        SQUARE_COVER,
+                    ],
                 );
             }
         }
@@ -1538,6 +1548,9 @@ esac
         assert!(has_pair(&a, "--audio-format", "mp3"));
         assert!(has_pair(&a, "--audio-quality", "320K"));
         assert!(a.contains(&"--embed-thumbnail".to_string()));
+        // copertina quadrata, senza le bande della miniatura 16:9
+        assert!(has_pair(&a, "--ppa", SQUARE_COVER));
+        assert!(SQUARE_COVER.contains("crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\""));
         // anno di uscita, non data di caricamento
         assert!(has_pair(&a, "--parse-metadata", RELEASE_YEAR));
     }
