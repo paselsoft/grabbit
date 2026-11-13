@@ -15,7 +15,7 @@ ambiente isolato e la fotografa dopo ogni passo.
 ## 1. Prepara l'ambiente (una volta per sessione)
 
 ```bash
-apt-get install -y xvfb xdotool imagemagick libxkbcommon-x11-0 libgl1 libegl1 libgl1-mesa-dri libasound2-dev
+apt-get install -y xvfb xdotool xclip imagemagick libxkbcommon-x11-0 libgl1 libegl1 libgl1-mesa-dri libasound2-dev
 ```
 
 Poi `cargo build` (lo script usa `target/debug/grabbit`).
@@ -30,7 +30,8 @@ python3 .claude/skills/ui-snapshot/scripts/snapshot.py --out <cartella-scratchpa
 ```
 
 Passi: `shot:nome`, `click:X,Y`, `scroll:N` (rotellina dove si trova il mouse), `wait:secondi`,
-`key:Return`, `type:testo`.
+`key:Return`, `type:testo`, `clip:testo` (appunti, con `xclip`: il `key:` o `type:` dopo
+ridà il focus alla finestra, come tornare su Grabbit dal browser).
 
 - Lo schermo è 1000x1000; la finestra (780x780) è in alto a sinistra. Fai
   sempre prima un `shot:` e leggi le coordinate dall'immagine, poi clicca.

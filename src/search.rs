@@ -270,8 +270,16 @@ pub fn fetch_thumbnail(url: &str, max_w: u32, max_h: u32) -> Result<(u32, u32, V
 }
 
 /// Copertina incorporata in un brano (JPEG o PNG), rimpicciolita a `px` di lato al massimo.
+/// Copertina di un album, quadrata. Le copertine che YouTube mette nei file sono immagini
+/// 16:9 con la copertina vera al centro e bande ai lati: si tiene il quadrato centrale,
+/// altrimenti nel riquadro quadrato apparirebbe schiacciata.
 pub fn decode_cover(bytes: &[u8], px: u32) -> Result<(u32, u32, Vec<u8>)> {
-    decode_thumbnail(bytes, px, px)
+    let img = image::load_from_memory(bytes)?;
+    let side = img.width().min(img.height());
+    let x = (img.width() - side) / 2;
+    let y = (img.height() - side) / 2;
+    let img = img.crop_imm(x, y, side, side).thumbnail(px, px).to_rgba8();
+    Ok((img.width(), img.height(), img.into_raw()))
 }
 
 fn decode_thumbnail(bytes: &[u8], max_w: u32, max_h: u32) -> Result<(u32, u32, Vec<u8>)> {
@@ -773,6 +781,28 @@ pub fn fmt_views(v: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn covers_are_cropped_to_the_center_square() {
+        // 16:9 come le copertine di YouTube: bande nere ai lati, copertina rossa al centro
+        let mut img = image::RgbImage::from_pixel(160, 90, image::Rgb([0, 0, 0]));
+        for y in 0..90 {
+            for x in 35..125 {
+                img.put_pixel(x, y, image::Rgb([200, 0, 0]));
+            }
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let (w, h, rgba) = decode_cover(&png, 64).unwrap();
+        assert_eq!((w, h), (64, 64));
+        // gli angoli sono rossi: le bande nere sono state tolte
+        for (x, y) in [(0, 0), (63, 0), (0, 63), (63, 63)] {
+            let p = &rgba[((y * w + x) * 4) as usize..][..3];
+            assert!(p[0] > 150 && p[1] < 50, "pixel ({x},{y}) = {p:?}");
+        }
+    }
     use super::*;
 
     fn toolset() -> Toolset {

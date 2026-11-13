@@ -16,6 +16,8 @@ eframe = { version = "0.37", default-features = false, features = [
     "glow", "default_fonts", "clipboard", "wayland", "x11", "accesskit",
 ] }
 rfd = "0.17"
+# lettura degli appunti per proporre il link appena copiato (la stessa usata da eframe)
+arboard = { version = "3.7", default-features = false }
 # png per l'icona; jpeg e webp per le copertine nei risultati della ricerca
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 
