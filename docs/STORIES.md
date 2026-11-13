@@ -113,3 +113,26 @@ Accettazione:
 - [unit] Per l'audio yt-dlp salva nei file la copertina già quadrata (filtro crop di ffmpeg).
 - [manual] Sul Mac «25» e «19» di Adele hanno la copertina giusta.
 Stato: fatta
+
+## Milestone 4: libreria e player più comodi (0.6.0)
+
+S-010, S-011
+
+### S-010 Vedere nei risultati cosa ho già
+Come utente, nei risultati della ricerca gli album e i brani che ho già nella libreria sono
+segnati «Già nella libreria», con «Ascolta» che li apre nella scheda Ascolta.
+Accettazione:
+- [unit] Un risultato si ritrova nella libreria per titolo e artista, senza badare a maiuscole, punteggiatura o un anno davanti alla cartella («2002.Tracce»).
+- [snap] Il brano che c'è mostra «Già nella libreria · Ascolta», quello che manca no.
+- [manual] Sul Mac, nella discografia di un artista gli album già scaricati sono segnati.
+Stato: fatta
+
+### S-011 Ascoltare in modo più comodo
+Come utente, nel player ho «Casuale» e «Ripeti» (tutto o il brano), la barra spaziatrice e
+le frecce, «Ascolta tutto» per un artista, e alla riapertura ritrovo il brano dove l'avevo lasciato.
+Accettazione:
+- [unit] Il mescolamento tiene tutti i brani una volta sola.
+- [snap] Barra del player con «Casuale» e «Ripeti brano» attivi, leggibili; «Ascolta tutto (N brani)» sugli artisti con più uscite.
+- [snap] Dopo un riavvio la barra mostra l'ultimo brano in pausa alla posizione salvata, con le stesse scelte di Casuale e Ripeti.
+- [manual] Sul Mac: spazio mette in pausa, le frecce cambiano brano, «Ripeti tutto» ricomincia l'album.
+Stato: fatta

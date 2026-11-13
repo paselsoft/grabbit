@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Interfaccia grafica (egui).
-use crate::config::{Config, Mode};
+use crate::config::{Config, Mode, Repeat};
 use crate::downloader::{self, Emit, Event, JsRuntime, Toolset};
 use crate::player;
 use crate::search::{self, SearchResult};
@@ -255,6 +255,9 @@ impl App {
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
         app.start_setup(&cc.egui_ctx);
+        if app.cfg.last_track.is_some() {
+            app.start_scan(&cc.egui_ctx);
+        }
         // il controllo degli aggiornamenti parte subito, senza aspettare yt-dlp e ffmpeg
         app.start_update_check(&cc.egui_ctx);
         app
@@ -666,6 +669,10 @@ impl App {
                         self.search.thumbs = vec![None; r.len()];
                         self.start_thumbnails(ctx, seq, &r);
                         self.search.results = r;
+                        if (self.listen.library.is_none() || self.listen.stale) && !self.listen.busy
+                        {
+                            self.start_scan(ctx);
+                        }
                     }
                     Err(e) => self.search.error = Some(e),
                 }
@@ -725,6 +732,10 @@ impl App {
                     self.notify_finished(ctx);
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
+                    // con dei risultati sullo schermo, «Già nella libreria» va aggiornato subito
+                    if !self.search.results.is_empty() && !self.listen.busy {
+                        self.start_scan(ctx);
+                    }
                 }
             },
         }
@@ -744,6 +755,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        self.player_keys(ctx);
         // il brano in ascolto resta in basso in tutte e due le schede
         self.now_playing_bar(ui);
         // «Scarica» e l'avanzamento restano visibili senza scorrere (sopra il player)
@@ -948,6 +960,23 @@ impl App {
         let mut do_cancel = false;
         let mut download: Vec<String> = Vec::new();
         let mut add: Vec<String> = Vec::new();
+        let mut listen_album: Option<usize> = None;
+        // risultati che ci sono già nella libreria di «Ascolta» (indice dell'album)
+        let owned: Vec<Option<usize>> = match &self.listen.library {
+            Some(lib) => self
+                .search
+                .results
+                .iter()
+                .map(|r| {
+                    if r.collection {
+                        lib.find_album(&r.title, &r.channel)
+                    } else {
+                        lib.find_track(&r.title, &r.channel).map(|(a, _)| a)
+                    }
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         let mut clear = false;
 
         card(ui, |ui| {
@@ -1187,13 +1216,26 @@ impl App {
                                         6,
                                         Color32::from_rgb(36, 36, 40),
                                     );
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        if r.collection { "♫" } else { "▶" },
-                                        egui::FontId::proportional(20.0),
-                                        Color32::from_rgb(90, 90, 98),
-                                    );
+                                    // disegnato: i caratteri ▶ e ♫ escono come quadratini
+                                    let col = Color32::from_rgb(90, 90, 98);
+                                    let c = rect.center();
+                                    if r.collection {
+                                        ui.painter().circle_filled(c + egui::vec2(-4.0, 6.0), 5.0, col);
+                                        ui.painter().line_segment(
+                                            [c + egui::vec2(0.5, 6.0), c + egui::vec2(0.5, -10.0)],
+                                            egui::Stroke::new(2.0, col),
+                                        );
+                                    } else {
+                                        ui.painter().add(egui::Shape::convex_polygon(
+                                            vec![
+                                                c + egui::vec2(-6.0, -9.0),
+                                                c + egui::vec2(9.0, 0.0),
+                                                c + egui::vec2(-6.0, 9.0),
+                                            ],
+                                            col,
+                                            egui::Stroke::NONE,
+                                        ));
+                                    }
                                 }
                             }
                             let cover = cover.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1248,6 +1290,28 @@ impl App {
                                         )
                                         .truncate(),
                                     );
+                                }
+                                if let Some(album) = owned.get(i).copied().flatten() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(tr!(
+                                                "Già nella libreria",
+                                                "Already in the library"
+                                            ))
+                                            .small()
+                                            .color(OK),
+                                        );
+                                        if ui
+                                            .small_button(tr!("Ascolta", "Listen"))
+                                            .on_hover_text(tr!(
+                                                "Apri nella scheda Ascolta",
+                                                "Open in the Listen tab"
+                                            ))
+                                            .clicked()
+                                        {
+                                            listen_album = Some(album);
+                                        }
+                                    });
                                 }
                                 ui.horizontal(|ui| {
                                     let dl = ui
@@ -1378,6 +1442,11 @@ impl App {
         if !download.is_empty() {
             self.search.notice = None;
             self.start_jobs(ctx, download);
+        }
+        if let Some(a) = listen_album {
+            self.tab = Tab::Listen;
+            self.listen.open = Some(a);
+            self.listen.filter.clear();
         }
         if clear {
             self.cancel_search();
@@ -2191,6 +2260,16 @@ struct ListenUi {
     seek_drag: Option<f32>,
     /// testo di «Cerca nella libreria»
     filter: String,
+    /// elenco scelto (un album o tutto un artista) nel suo ordine
+    base: Vec<PathBuf>,
+    /// ordine di ascolto: `base`, oppure mescolato con «Casuale»
+    queue: Vec<PathBuf>,
+    /// posizione in `queue` del brano in ascolto
+    qpos: usize,
+    /// l'ultimo brano ascoltato è già stato ripreso (una volta sola, all'avvio)
+    restored: bool,
+    /// quando è stata salvata l'ultima posizione nel brano
+    last_save: Option<std::time::Instant>,
 }
 
 /// Icone dei pulsanti del player, disegnate (i caratteri ▶ ⏸ non ci sono nei font di serie).
@@ -2365,11 +2444,23 @@ impl App {
         }
         self.listen.library = Some(library);
         self.listen.busy = false;
+        self.restore_last_track();
     }
 
     fn now_track(&self) -> Option<&player::Track> {
         let (a, t) = self.listen.now?;
         self.listen.library.as_ref()?.albums.get(a)?.tracks.get(t)
+    }
+
+    /// (album, brano) del file nella libreria.
+    fn locate(&self, path: &std::path::Path) -> Option<(usize, usize)> {
+        let lib = self.listen.library.as_ref()?;
+        lib.albums.iter().enumerate().find_map(|(ai, a)| {
+            a.tracks
+                .iter()
+                .position(|t| t.path == path)
+                .map(|ti| (ai, ti))
+        })
     }
 
     fn play_at(&mut self, album: usize, track: usize) {
@@ -2382,40 +2473,120 @@ impl App {
         else {
             return;
         };
+        let path = t.path.clone();
         self.engine.set_volume(self.cfg.volume);
-        self.engine.play(&t.path);
+        self.engine.play(&path);
         self.listen.now = Some((album, track));
         self.listen.seek_drag = None;
+        self.cfg.last_track = Some(path);
+        self.cfg.last_pos = 0.0;
+        self.cfg.save();
+        self.listen.last_save = Some(std::time::Instant::now());
     }
 
-    fn play_next(&mut self) {
-        let Some((a, t)) = self.listen.now else {
+    /// Ascolta un elenco di brani (un album, tutto un artista) a partire da `start`.
+    fn start_queue(&mut self, list: Vec<PathBuf>, start: usize) {
+        if list.is_empty() {
+            return;
+        }
+        let start = start.min(list.len() - 1);
+        self.listen.base = list;
+        if self.cfg.shuffle {
+            // il brano scelto per primo, gli altri mescolati
+            let first = self.listen.base[start].clone();
+            let mut rest: Vec<PathBuf> = self
+                .listen
+                .base
+                .iter()
+                .filter(|p| **p != first)
+                .cloned()
+                .collect();
+            shuffle(&mut rest);
+            self.listen.queue = std::iter::once(first).chain(rest).collect();
+            self.listen.qpos = 0;
+        } else {
+            self.listen.queue = self.listen.base.clone();
+            self.listen.qpos = start;
+        }
+        self.play_current();
+    }
+
+    fn play_current(&mut self) {
+        let Some(path) = self.listen.queue.get(self.listen.qpos).cloned() else {
             return;
         };
-        let len = self
+        match self.locate(&path) {
+            Some((a, t)) => self.play_at(a, t),
+            // il file non c'è più (cartella riletta): si passa al successivo
+            None => {
+                self.listen.queue.remove(self.listen.qpos);
+                if self.listen.qpos < self.listen.queue.len() {
+                    self.play_current();
+                }
+            }
+        }
+    }
+
+    /// «Ascolta l'album» o un clic su un brano: l'album, da quel brano.
+    fn play_album_from(&mut self, album: usize, track: usize) {
+        let list: Vec<PathBuf> = self
             .listen
             .library
             .as_ref()
-            .and_then(|l| l.albums.get(a))
-            .map_or(0, |al| al.tracks.len());
-        if t + 1 < len {
-            self.play_at(a, t + 1);
+            .and_then(|l| l.albums.get(album))
+            .map(|a| a.tracks.iter().map(|t| t.path.clone()).collect())
+            .unwrap_or_default();
+        self.start_queue(list, track);
+    }
+
+    /// «Ascolta tutto»: le uscite di un artista di fila, nell'ordine dell'elenco.
+    fn play_albums(&mut self, albums: &[usize]) {
+        let list: Vec<PathBuf> = match &self.listen.library {
+            Some(lib) => albums
+                .iter()
+                .filter_map(|&i| lib.albums.get(i))
+                .flat_map(|a| a.tracks.iter().map(|t| t.path.clone()))
+                .collect(),
+            None => return,
+        };
+        self.start_queue(list, 0);
+    }
+
+    /// Brano successivo. `auto`: il brano è finito da solo (allora vale «Ripeti brano»).
+    fn play_next(&mut self, auto: bool) {
+        if self.listen.now.is_none() {
+            return;
+        }
+        if auto && self.cfg.repeat == Repeat::One {
+            self.play_current();
+        } else if self.listen.qpos + 1 < self.listen.queue.len() {
+            self.listen.qpos += 1;
+            self.play_current();
+        } else if self.cfg.repeat == Repeat::All && !self.listen.queue.is_empty() {
+            if self.cfg.shuffle {
+                shuffle(&mut self.listen.queue);
+            }
+            self.listen.qpos = 0;
+            self.play_current();
         } else {
-            // fine dell'album
+            // fine dell'elenco
             self.engine.stop();
             self.listen.now = None;
+            self.cfg.last_track = None;
+            self.cfg.save();
         }
     }
 
     fn play_prev(&mut self) {
-        let Some((a, t)) = self.listen.now else {
+        if self.listen.now.is_none() {
             return;
-        };
+        }
         // come nei lettori musicali: dopo i primi secondi «indietro» riparte dall'inizio
-        if self.engine.status().pos > Duration::from_secs(3) || t == 0 {
+        if self.engine.status().pos > Duration::from_secs(3) || self.listen.qpos == 0 {
             self.engine.seek(Duration::ZERO);
         } else {
-            self.play_at(a, t - 1);
+            self.listen.qpos -= 1;
+            self.play_current();
         }
     }
 
@@ -2426,9 +2597,100 @@ impl App {
                 self.engine.resume();
             } else {
                 self.engine.pause();
+                self.save_position(st.pos);
             }
-        } else if let Some((a, t)) = self.listen.now {
-            self.play_at(a, t);
+        } else if self.listen.now.is_some() {
+            self.play_current();
+        }
+    }
+
+    /// «Casuale»: mescola i brani che restano, o rimette l'ordine dell'elenco.
+    fn toggle_shuffle(&mut self) {
+        self.cfg.shuffle = !self.cfg.shuffle;
+        self.cfg.save();
+        let Some(current) = self.listen.queue.get(self.listen.qpos).cloned() else {
+            return;
+        };
+        if self.cfg.shuffle {
+            let mut rest: Vec<PathBuf> = self
+                .listen
+                .base
+                .iter()
+                .filter(|p| **p != current)
+                .cloned()
+                .collect();
+            shuffle(&mut rest);
+            self.listen.queue = std::iter::once(current).chain(rest).collect();
+            self.listen.qpos = 0;
+        } else {
+            self.listen.queue = self.listen.base.clone();
+            self.listen.qpos = self
+                .listen
+                .queue
+                .iter()
+                .position(|p| *p == current)
+                .unwrap_or(0);
+        }
+    }
+
+    /// Ricorda brano e posizione, per riprendere alla riapertura.
+    fn save_position(&mut self, pos: Duration) {
+        self.listen.last_save = Some(std::time::Instant::now());
+        if self.listen.now.is_some() {
+            self.cfg.last_pos = pos.as_secs_f32();
+            self.cfg.save();
+        }
+    }
+
+    /// All'avvio, alla prima lettura della libreria: l'ultimo brano ascoltato, in pausa
+    /// dove era rimasto, con il suo album come elenco.
+    fn restore_last_track(&mut self) {
+        if self.listen.restored || self.listen.now.is_some() {
+            return;
+        }
+        self.listen.restored = true;
+        let Some(path) = self.cfg.last_track.clone() else {
+            return;
+        };
+        let Some((a, t)) = self.locate(&path) else {
+            return;
+        };
+        let list: Vec<PathBuf> = self.listen.library.as_ref().map_or(Vec::new(), |l| {
+            l.albums[a].tracks.iter().map(|t| t.path.clone()).collect()
+        });
+        self.listen.base = list.clone();
+        self.listen.queue = list;
+        self.listen.qpos = t;
+        self.listen.now = Some((a, t));
+        self.engine.set_volume(self.cfg.volume);
+        self.engine
+            .load_paused(&path, Duration::from_secs_f32(self.cfg.last_pos.max(0.0)));
+    }
+
+    /// Tasti del player, quando non si sta scrivendo: spazio = pausa o riprendi,
+    /// frecce sinistra e destra = brano precedente e successivo.
+    fn player_keys(&mut self, ctx: &egui::Context) {
+        if self.listen.now.is_none() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let (space, left, right) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+            )
+        });
+        if space {
+            self.toggle_play();
+        }
+        if left {
+            self.play_prev();
+        }
+        if right {
+            self.play_next(false);
+        }
+        if space || left || right {
+            ctx.request_repaint();
         }
     }
 
@@ -2438,7 +2700,17 @@ impl App {
         if st.ended != self.listen.last_ended {
             self.listen.last_ended = st.ended;
             if self.listen.now.is_some() {
-                self.play_next();
+                self.play_next(true);
+            }
+        }
+        // ogni tanto si salva dove si è arrivati, per riprendere alla riapertura
+        if st.loaded && !st.paused {
+            let due = self
+                .listen
+                .last_save
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(10));
+            if due {
+                self.save_position(st.pos);
             }
         }
         // mentre suona (o sta per partire) la barra avanza da sola, senza aspettare il mouse
@@ -2475,6 +2747,7 @@ impl App {
     fn listen_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut rescan = false;
         let mut play: Option<(usize, usize)> = None;
+        let mut play_group: Option<Vec<usize>> = None;
         let mut open: Option<Option<usize>> = None;
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2603,6 +2876,21 @@ impl App {
                             header.open(Some(true))
                         };
                         header.show(ui, |ui| {
+                            let n: usize = group.iter().map(|&i| lib.albums[i].tracks.len()).sum();
+                            if group.len() > 1
+                                && ui
+                                    .small_button(tr!(
+                                        format!("Ascolta tutto ({n} brani)"),
+                                        format!("Play all ({n} tracks)")
+                                    ))
+                                    .on_hover_text(tr!(
+                                        format!("Ascolta di fila tutte le uscite di {title}"),
+                                        format!("Play all of {title}'s releases in a row")
+                                    ))
+                                    .clicked()
+                            {
+                                play_group = Some(group.to_vec());
+                            }
                             for &i in group {
                                 let a = &lib.albums[i];
                                 let cover = self.listen.covers.get(i).and_then(|c| c.as_ref());
@@ -2727,7 +3015,11 @@ impl App {
             self.listen.open = o;
         }
         if let Some((a, t)) = play {
-            self.play_at(a, t);
+            self.play_album_from(a, t);
+            ctx.request_repaint();
+        }
+        if let Some(albums) = play_group {
+            self.play_albums(&albums);
             ctx.request_repaint();
         }
     }
@@ -2749,6 +3041,8 @@ impl App {
             .unwrap_or_default();
         let st = self.engine.status();
         let mut action: Option<Icon> = None;
+        let mut toggle_shuffle = false;
+        let mut cycle_repeat = false;
         egui::Panel::bottom("now_playing")
             .frame(
                 egui::Frame::new()
@@ -2784,6 +3078,49 @@ impl App {
                             action = Some(icon);
                         }
                     }
+                    ui.vertical(|ui| {
+                        let shuffle = ui
+                            .selectable_label(
+                                self.cfg.shuffle,
+                                on_off_text(tr!("Casuale", "Shuffle"), self.cfg.shuffle, ui),
+                            )
+                            .on_hover_text(tr!(
+                                "Ascolta i brani in ordine casuale",
+                                "Play the tracks in random order"
+                            ));
+                        if shuffle.clicked() {
+                            toggle_shuffle = true;
+                        }
+                        let (text, hover) = match self.cfg.repeat {
+                            Repeat::Off => (
+                                tr!("Ripeti", "Repeat"),
+                                tr!(
+                                    "Non ripete: si ferma alla fine",
+                                    "No repeat: stops at the end"
+                                ),
+                            ),
+                            Repeat::All => (
+                                tr!("Ripeti tutto", "Repeat all"),
+                                tr!(
+                                    "Ricomincia l'elenco quando finisce",
+                                    "Starts the list again at the end"
+                                ),
+                            ),
+                            Repeat::One => (
+                                tr!("Ripeti brano", "Repeat track"),
+                                tr!("Ripete questo brano", "Repeats this track"),
+                            ),
+                        };
+                        let repeat = ui
+                            .selectable_label(
+                                self.cfg.repeat != Repeat::Off,
+                                on_off_text(text, self.cfg.repeat != Repeat::Off, ui),
+                            )
+                            .on_hover_text(hover);
+                        if repeat.clicked() {
+                            cycle_repeat = true;
+                        }
+                    });
                     ui.vertical(|ui| {
                         ui.set_max_width((ui.available_width() - 150.0).max(80.0));
                         ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
@@ -2872,9 +3209,20 @@ impl App {
         }
         match action {
             Some(Icon::Prev) => self.play_prev(),
-            Some(Icon::Next) => self.play_next(),
+            Some(Icon::Next) => self.play_next(false),
             Some(Icon::Play) | Some(Icon::Pause) => self.toggle_play(),
             None => {}
+        }
+        if toggle_shuffle {
+            self.toggle_shuffle();
+        }
+        if cycle_repeat {
+            self.cfg.repeat = match self.cfg.repeat {
+                Repeat::Off => Repeat::All,
+                Repeat::All => Repeat::One,
+                Repeat::One => Repeat::Off,
+            };
+            self.cfg.save();
         }
     }
 }
@@ -3090,6 +3438,33 @@ fn copied_link(text: &str) -> Option<String> {
     ok.then(|| t.to_string())
 }
 
+/// Testo di un interruttore della barra del player: scuro sullo sfondo arancione quando è
+/// attivo, altrimenti si leggerebbe arancione su arancione.
+fn on_off_text(text: &str, on: bool, ui: &egui::Ui) -> RichText {
+    RichText::new(text).small().color(if on {
+        ON_ACCENT
+    } else {
+        ui.visuals().text_color()
+    })
+}
+
+/// Mescola un elenco (Fisher-Yates), con un generatore semplice seminato dall'orologio:
+/// per l'ordine casuale dei brani basta.
+fn shuffle<T>(v: &mut [T]) {
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    for i in (1..v.len()).rev() {
+        // xorshift64
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        v.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
 fn open_folder(p: &std::path::Path) {
     let cmd = if cfg!(windows) {
         "explorer"
@@ -3202,6 +3577,20 @@ mod tests {
         assert_eq!(copied_link("https://example.com/video"), None);
         assert_eq!(copied_link("https://youtu.be/a https://youtu.be/b"), None);
         assert_eq!(copied_link(""), None);
+    }
+
+    #[test]
+    fn shuffle_keeps_every_track_once() {
+        let mut v: Vec<u32> = (0..50).collect();
+        shuffle(&mut v);
+        let mut sorted = v.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..50).collect::<Vec<_>>());
+        assert_ne!(v, (0..50).collect::<Vec<_>>(), "50 brani rimasti in ordine");
+        let mut one = vec![7];
+        shuffle(&mut one);
+        assert_eq!(one, [7]);
+        shuffle::<u32>(&mut []);
     }
 
     #[test]

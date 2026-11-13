@@ -33,7 +33,12 @@ FAKE_TOOLS = {
     "yt-dlp": """#!/bin/sh
 case " $* " in
   *" --version "*) echo 2026.10.26; exit 0;;
-  *" --flat-playlist "*) exit 0;;
+  *" --flat-playlist "*)
+    # risultati di ricerca preparati (--search FILE): una riga JSON per risultato
+    case "$*" in *ytsearch*|*music.youtube.com/search*)
+      [ -n "$GRABBIT_FAKE_SEARCH" ] && cat "$GRABBIT_FAKE_SEARCH";;
+    esac
+    exit 0;;
 esac
 i=0
 while [ $i -le 20 ]; do
@@ -54,6 +59,10 @@ def main() -> int:
     ap.add_argument("--lang", default="it", choices=["it", "en"])
     ap.add_argument("--app", default="target/debug/grabbit")
     ap.add_argument("--display", default=":77")
+    ap.add_argument("--home", help="cartella della configurazione da tenere tra due avvii "
+                    "(per provare la ripresa); di serie una temporanea, cancellata alla fine")
+    ap.add_argument("--search", help="file con i risultati che il finto yt-dlp dà alla ricerca "
+                    "(una riga JSON per risultato, come --print di yt-dlp)")
     ap.add_argument("steps", nargs="*")
     a = ap.parse_args()
 
@@ -68,12 +77,13 @@ def main() -> int:
     out = os.path.abspath(a.out)
     os.makedirs(out, exist_ok=True)
 
-    home = tempfile.mkdtemp(prefix="grabbit-snap-")
+    keep = bool(a.home)
+    home = os.path.abspath(a.home) if keep else tempfile.mkdtemp(prefix="grabbit-snap-")
     data = os.path.join(home, ".local", "share")
     conf = os.path.join(home, ".config")
     bin_dir = os.path.join(data, "grabbit", "bin")
-    os.makedirs(bin_dir)
-    os.makedirs(os.path.join(conf, "grabbit"))
+    os.makedirs(bin_dir, exist_ok=True)
+    os.makedirs(os.path.join(conf, "grabbit"), exist_ok=True)
     for name, body in FAKE_TOOLS.items():
         p = os.path.join(bin_dir, name)
         with open(p, "w") as f:
@@ -82,12 +92,15 @@ def main() -> int:
     with open(os.path.join(home, ".asoundrc"), "w") as f:
         f.write("pcm.!default { type null }\nctl.!default { type hw card 0 }\n")
     downloads = os.path.join(home, "Download")
-    os.makedirs(downloads)
+    os.makedirs(downloads, exist_ok=True)
     cfg = {"out_dir": downloads, "auto_update_app": False}
     if a.music:
         cfg["player_dir"] = os.path.abspath(a.music)
-    with open(os.path.join(conf, "grabbit", "config.json"), "w") as f:
-        json.dump(cfg, f)
+    cfg_path = os.path.join(conf, "grabbit", "config.json")
+    # con --home la configurazione salvata dal primo avvio resta (ultimo brano, opzioni)
+    if not (keep and os.path.exists(cfg_path)):
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f)
 
     env = dict(os.environ)
     env.update(
@@ -100,6 +113,8 @@ def main() -> int:
         WINIT_UNIX_BACKEND="x11",
         WAYLAND_DISPLAY="",
     )
+    if a.search:
+        env["GRABBIT_FAKE_SEARCH"] = os.path.abspath(a.search)
 
     def x(*cmd):
         subprocess.run(cmd, env=env, check=True)
@@ -162,7 +177,8 @@ def main() -> int:
         proc.kill()
         xvfb.terminate()
         log.close()
-        shutil.rmtree(home, ignore_errors=True)
+        if not keep:
+            shutil.rmtree(home, ignore_errors=True)
     return 0
 
 

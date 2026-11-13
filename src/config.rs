@@ -9,6 +9,17 @@ pub enum Mode {
     Audio,
 }
 
+/// «Ripeti» del player.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Repeat {
+    #[default]
+    Off,
+    /// ricomincia l'elenco (album o artista) quando finisce
+    All,
+    /// ripete il brano
+    One,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
@@ -41,6 +52,12 @@ pub struct Config {
     pub skip_downloaded: bool,
     /// audio in cartelle Artista/Album/01 - Titolo (come iTunes e Plex)
     pub music_folders: bool,
+    /// player: ordine casuale
+    pub shuffle: bool,
+    pub repeat: Repeat,
+    /// ultimo brano ascoltato e posizione in secondi: alla riapertura si riprende da lì
+    pub last_track: Option<PathBuf>,
+    pub last_pos: f32,
 }
 
 impl Default for Config {
@@ -70,6 +87,10 @@ impl Default for Config {
             volume: 0.8,
             skip_downloaded: true,
             music_folders: true,
+            shuffle: false,
+            repeat: Repeat::Off,
+            last_track: None,
+            last_pos: 0.0,
         }
     }
 }

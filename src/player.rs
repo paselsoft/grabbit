@@ -147,6 +147,71 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
     lib
 }
 
+/// Testo per confrontare nomi di album, brani e artisti: minuscolo, solo lettere e cifre,
+/// senza un anno davanti («2002.Tracce» → «tracce»).
+pub fn match_key(s: &str) -> String {
+    let words: Vec<String> = s
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(String::from)
+        .collect();
+    // «2002.Tracce», «2019 - L'altra metà»: l'anno davanti non fa parte del nome
+    let skip = usize::from(
+        words.len() > 1
+            && words[0].len() == 4
+            && words[0].chars().all(|c| c.is_ascii_digit())
+            && year_of(&words[0]).is_some(),
+    );
+    words[skip..].join(" ")
+}
+
+impl Library {
+    /// L'album della libreria con questo titolo e di questo artista (un risultato della
+    /// ricerca): per scrivere «Già nella libreria».
+    pub fn find_album(&self, title: &str, artist: &str) -> Option<usize> {
+        let t = match_key(title);
+        if t.is_empty() {
+            return None;
+        }
+        let a = match_key(artist);
+        self.albums
+            .iter()
+            .position(|al| !al.loose && match_key(&al.name) == t && same_artist(al, None, &a))
+    }
+
+    /// Il brano della libreria con questo titolo e di questo artista: (album, brano).
+    pub fn find_track(&self, title: &str, artist: &str) -> Option<(usize, usize)> {
+        let t = match_key(title);
+        if t.is_empty() {
+            return None;
+        }
+        let a = match_key(artist);
+        self.albums.iter().enumerate().find_map(|(ai, al)| {
+            al.tracks
+                .iter()
+                .position(|tr| match_key(&tr.title) == t && same_artist(al, Some(tr), &a))
+                .map(|ti| (ai, ti))
+        })
+    }
+}
+
+/// L'artista cercato (`a`, già `match_key`) è quello dell'album o del brano? Uno dei due
+/// nomi contiene l'altro («francesco renga» e «francesco renga ermal meta»).
+fn same_artist(al: &Album, tr: Option<&Track>, a: &str) -> bool {
+    if a.is_empty() {
+        return true;
+    }
+    let mut names = vec![match_key(&al.group), match_key(&al.artist)];
+    if let Some(t) = tr {
+        names.push(match_key(&t.artist));
+    }
+    names
+        .iter()
+        .filter(|n| !n.is_empty())
+        .any(|n| n.contains(a) || a.contains(n.as_str()))
+}
+
 /// Fino a questo numero di brani un'uscita conta come singolo (o EP breve).
 pub const SINGLE_MAX_TRACKS: usize = 3;
 
@@ -345,7 +410,8 @@ pub fn fmt_time(d: Duration) -> String {
 // ───────────────────────────── riproduzione ─────────────────────────────
 
 enum Cmd {
-    Play(PathBuf),
+    /// brano, da dove partire, se restare in pausa (ripresa all'avvio)
+    Play(PathBuf, Duration, bool),
     Pause,
     Resume,
     Stop,
@@ -389,7 +455,7 @@ impl Engine {
             };
             loop {
                 match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Cmd::Play(path)) => {
+                    Ok(Cmd::Play(path, start, paused)) => {
                         if let Some(p) = player.take() {
                             p.stop();
                         }
@@ -420,12 +486,19 @@ impl Engine {
                             (Ok(dec), Some(s)) => {
                                 let p = rodio::Player::connect_new(s.mixer());
                                 p.set_volume(volume);
+                                // in pausa prima di aggiungere il brano: non si sente nulla
+                                if paused {
+                                    p.pause();
+                                }
                                 p.append(dec);
+                                if !start.is_zero() {
+                                    let _ = p.try_seek(start);
+                                }
                                 player = Some(p);
                                 set(&|s| {
                                     s.loaded = true;
-                                    s.paused = false;
-                                    s.pos = Duration::ZERO;
+                                    s.paused = paused;
+                                    s.pos = start;
                                     s.error = None;
                                 });
                             }
@@ -504,7 +577,13 @@ impl Engine {
     }
 
     pub fn play(&self, path: &Path) {
-        let _ = self.tx.send(Cmd::Play(path.to_path_buf()));
+        let _ = self
+            .tx
+            .send(Cmd::Play(path.to_path_buf(), Duration::ZERO, false));
+    }
+    /// Carica un brano in pausa alla posizione indicata (per riprendere da dove eri).
+    pub fn load_paused(&self, path: &Path, pos: Duration) {
+        let _ = self.tx.send(Cmd::Play(path.to_path_buf(), pos, true));
     }
     pub fn pause(&self) {
         let _ = self.tx.send(Cmd::Pause);
@@ -592,6 +671,43 @@ mod tests {
             .map(|t| t.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["y", "x", "a", "b"]);
+    }
+
+    #[test]
+    fn search_results_are_found_in_the_library() {
+        assert_eq!(match_key("2002.Tracce"), "tracce");
+        assert_eq!(match_key("L'altra metà"), "l altra metà");
+        assert_eq!(match_key("21"), "21");
+        assert_eq!(match_key("2019 - L'altra metà"), "l altra metà");
+        let track = |title: &str| Track {
+            title: title.into(),
+            ..Track::default()
+        };
+        let lib = Library {
+            albums: vec![
+                Album {
+                    name: "21".into(),
+                    artist: "Adele".into(),
+                    group: "Adele".into(),
+                    tracks: vec![track("Rolling in the Deep"), track("Someone Like You")],
+                    ..Album::default()
+                },
+                Album {
+                    name: "2019.L'altra metà".into(),
+                    artist: "Francesco Renga, Ermal Meta".into(),
+                    group: "Francesco Renga".into(),
+                    tracks: vec![track("L'altra metà")],
+                    ..Album::default()
+                },
+            ],
+            unsupported: 0,
+        };
+        assert_eq!(lib.find_album("21", "Adele"), Some(0));
+        assert_eq!(lib.find_album("21", "Altro artista"), None);
+        assert_eq!(lib.find_album("25", "Adele"), None);
+        assert_eq!(lib.find_album("L'altra metà", "Francesco Renga"), Some(1));
+        assert_eq!(lib.find_track("Someone like you", "Adele"), Some((0, 1)));
+        assert_eq!(lib.find_track("Hello", "Adele"), None);
     }
 
     #[test]

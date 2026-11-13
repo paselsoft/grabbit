@@ -1096,6 +1096,18 @@ fn run_job(
 mod tests {
     use super::*;
 
+    /// I test che scrivono e avviano un finto yt-dlp girano uno alla volta: se un test
+    /// avvia un processo mentre un altro sta ancora scrivendo il suo script, il processo
+    /// figlio eredita per un istante il file aperto e Linux rifiuta di eseguirlo
+    /// («Text file busy»): l'avvio fallisce a caso.
+    #[cfg(unix)]
+    static FAKE_YTDLP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    fn fake_ytdlp_lock() -> std::sync::MutexGuard<'static, ()> {
+        FAKE_YTDLP.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn job(target: &str, out_name: Option<&str>, audio_only: bool) -> Job {
         Job {
             id: 0,
@@ -1114,6 +1126,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn albums_are_split_into_tracks_and_downloaded_in_parallel() {
+        let _guard = fake_ytdlp_lock();
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Mutex;
         let dir = std::env::temp_dir().join(format!("grabbit-par-{}", std::process::id()));
@@ -1217,6 +1230,7 @@ echo "GRBFILE|/x/$last"
     #[cfg(unix)]
     #[test]
     fn already_downloaded_tracks_are_skipped() {
+        let _guard = fake_ytdlp_lock();
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Mutex;
         let dir = std::env::temp_dir().join(format!("grabbit-arc-{}", std::process::id()));
@@ -1332,6 +1346,7 @@ echo "GRBFILE|/x/$last"
     #[cfg(unix)]
     #[test]
     fn music_albums_go_in_artist_album_folders() {
+        let _guard = fake_ytdlp_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("grabbit-mf-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1527,6 +1542,7 @@ esac
     #[cfg(unix)]
     #[test]
     fn single_tracks_can_be_stopped_and_retried() {
+        let _guard = fake_ytdlp_lock();
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Mutex;
         let dir = std::env::temp_dir().join(format!("grabbit-stop-{}", std::process::id()));

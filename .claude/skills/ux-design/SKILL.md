@@ -86,7 +86,7 @@ Check: ogni stato ha uno screenshot o dei dati di prova che lo mostrano.
 - I puntini «…» quando il comando chiede altro prima di agire («Sfoglia…»).
 - Errori: cosa è successo e come rimediare, senza colpe e senza gergo.
 - Conferme che ripetono l'azione: «Eliminare 3 brani?» con «Elimina» e «Annulla», mai «Sì» e «No».
-- Simboli: i font di serie di egui non hanno → ✓ ⏸ ⏮ (escono quadratini; il test
+- Simboli: i font di serie di egui non hanno → ✓ ▶ ⏸ ⏮ ♫ (escono quadratini; il test
   `ui_text_has_no_missing_glyphs` li controlla). Per le frecce usa «›». Le icone
   si disegnano con il painter, come `icon_button` in `src/app.rs`.
 
