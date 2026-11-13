@@ -168,3 +168,12 @@ Accettazione:
 - [snap] La casella in «Ascolta»; i brani della libreria si misurano in sottofondo.
 - [manual] Sul Mac, passando da un album vecchio a uno recente il volume resta simile.
 Stato: fatta (manca la prova [manual] sul Mac)
+
+### S-015 Guardare un video musicale dalla libreria
+Come utente, un video musicale scaricato compare in «Ascolta» segnato «Video» e, cliccandolo,
+si apre nel player video del computer (QuickTime sul Mac).
+Accettazione:
+- [unit] Un file video (MP4 con una traccia video, MKV, MOV, M4V) è segnato come video; la durata viene dalla traccia audio.
+- [snap] La riga mostra «Video» e la durata; «Ascolta l'album», Casuale e «Ascolta tutto» saltano i video.
+- [manual] Sul Mac il video si apre in QuickTime e la musica di Grabbit si mette in pausa.
+Stato: fatta (manca la prova [manual] sul Mac)

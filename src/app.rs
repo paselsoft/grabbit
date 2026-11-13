@@ -2590,7 +2590,7 @@ impl App {
         // i brani non ancora misurati, in sottofondo, uno alla volta
         if self.cfg.normalize {
             for t in library.albums.iter().flat_map(|a| &a.tracks) {
-                if self.gains.get(&t.path).is_none() {
+                if !t.video && self.gains.get(&t.path).is_none() {
                     self.analyzer.later(&t.path);
                 }
             }
@@ -2713,9 +2713,23 @@ impl App {
             .library
             .as_ref()
             .and_then(|l| l.albums.get(album))
-            .map(|a| a.tracks.iter().map(|t| t.path.clone()).collect())
+            .map(|a| {
+                a.tracks
+                    .iter()
+                    .filter(|t| !t.video)
+                    .map(|t| t.path.clone())
+                    .collect()
+            })
             .unwrap_or_default();
-        self.start_queue(list, track);
+        // un video cliccato non è nell'elenco audio: si apre a parte (vedi listen_view)
+        let start = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(album)?.tracks.get(track))
+            .and_then(|t| list.iter().position(|p| *p == t.path))
+            .unwrap_or(0);
+        self.start_queue(list, start);
     }
 
     /// «Ascolta tutto»: le uscite di un artista di fila, nell'ordine dell'elenco.
@@ -2724,7 +2738,7 @@ impl App {
             Some(lib) => albums
                 .iter()
                 .filter_map(|&i| lib.albums.get(i))
-                .flat_map(|a| a.tracks.iter().map(|t| t.path.clone()))
+                .flat_map(|a| a.tracks.iter().filter(|t| !t.video).map(|t| t.path.clone()))
                 .collect(),
             None => return,
         };
@@ -2929,6 +2943,7 @@ impl App {
         let mut play: Option<(usize, usize)> = None;
         let mut play_group: Option<Vec<usize>> = None;
         let mut add_music: Option<PathBuf> = None;
+        let mut watch: Option<PathBuf> = None;
         let mut toggle_norm = false;
         let mut confirm: Option<usize> = None;
         let mut open: Option<Option<usize>> = None;
@@ -3204,6 +3219,13 @@ impl App {
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         ui.set_min_width(w);
+                                        if t.video {
+                                            ui.label(
+                                                RichText::new(tr!("Video", "Video"))
+                                                    .small()
+                                                    .color(ACCENT_LIGHT),
+                                            );
+                                        }
                                         ui.add(
                                             egui::Label::new(
                                                 RichText::new(&t.title).color(color).strong(),
@@ -3222,12 +3244,21 @@ impl App {
                                 egui::Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let resp = if t.video {
+                            resp.on_hover_text(tr!(
+                                "Si apre nel player video del computer (QuickTime sul Mac)",
+                                "Opens in the computer's video player (QuickTime on the Mac)"
+                            ))
+                        } else {
+                            resp
+                        };
                         resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::Role::Button,
-                                true,
-                                tr!(format!("Ascolta {}", t.title), format!("Play {}", t.title)),
-                            )
+                            let text = if t.video {
+                                tr!(format!("Guarda {}", t.title), format!("Watch {}", t.title))
+                            } else {
+                                tr!(format!("Ascolta {}", t.title), format!("Play {}", t.title))
+                            };
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, text)
                         });
                         if resp.hovered() || current {
                             ui.painter().rect_stroke(
@@ -3238,7 +3269,11 @@ impl App {
                             );
                         }
                         if resp.clicked() {
-                            play = Some((ai, ti));
+                            if t.video {
+                                watch = Some(t.path.clone());
+                            } else {
+                                play = Some((ai, ti));
+                            }
                         }
                     }
                 }
@@ -3262,6 +3297,14 @@ impl App {
         if let Some(dir) = add_music {
             self.add_to_music(ctx, dir);
         }
+        if let Some(video) = watch {
+            // il player di Grabbit si mette in pausa: si guarda il video
+            let st = self.engine.status();
+            if st.loaded && !st.paused {
+                self.toggle_play();
+            }
+            open_folder(&video);
+        }
         if toggle_norm {
             self.cfg.normalize = !self.cfg.normalize;
             self.cfg.save();
@@ -3270,7 +3313,7 @@ impl App {
             if self.cfg.normalize {
                 if let Some(lib) = &self.listen.library {
                     for t in lib.albums.iter().flat_map(|a| &a.tracks) {
-                        if self.gains.get(&t.path).is_none() {
+                        if !t.video && self.gains.get(&t.path).is_none() {
                             self.analyzer.later(&t.path);
                         }
                     }
@@ -3913,6 +3956,7 @@ fn shuffle<T>(v: &mut [T]) {
     }
 }
 
+/// Apre una cartella, o un file con il programma di serie (un video nel player video).
 fn open_folder(p: &std::path::Path) {
     let cmd = if cfg!(windows) {
         "explorer"

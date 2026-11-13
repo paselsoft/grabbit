@@ -19,6 +19,9 @@ use symphonia::core::probe::Hint;
 
 /// Estensioni che il player sa riprodurre.
 const PLAYABLE: [&str; 8] = ["mp3", "m4a", "mp4", "aac", "flac", "wav", "ogg", "oga"];
+/// Video che il player non legge ma si aprono nel player video del sistema
+/// (gli MP4 con un video dentro si riconoscono leggendo il file).
+const VIDEO: [&str; 4] = ["mkv", "mov", "m4v", "avi"];
 /// Estensioni audio che il player riconosce ma non sa riprodurre (si contano soltanto).
 const UNSUPPORTED: [&str; 3] = ["opus", "webm", "weba"];
 /// Profondità massima delle sottocartelle esplorate.
@@ -31,6 +34,8 @@ pub struct Track {
     pub artist: String,
     pub number: Option<u32>,
     pub duration: Option<Duration>,
+    /// file con un video (es. un video musicale MP4): si apre nel player video del sistema
+    pub video: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -94,7 +99,7 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
                 continue;
             }
             let ext = ext_of(&p);
-            if PLAYABLE.contains(&ext.as_str()) {
+            if PLAYABLE.contains(&ext.as_str()) || VIDEO.contains(&ext.as_str()) {
                 files.push(p);
             } else if UNSUPPORTED.contains(&ext.as_str()) {
                 lib.unsupported += 1;
@@ -335,6 +340,10 @@ fn read_track(path: &Path) -> (Track, Tags) {
         ..Track::default()
     };
     let mut tags = Tags::default();
+    if VIDEO.contains(&ext_of(path).as_str()) {
+        track.video = true;
+        return (track, tags);
+    }
     let Ok(file) = File::open(path) else {
         return (track, tags);
     };
@@ -349,7 +358,19 @@ fn read_track(path: &Path) -> (Track, Tags) {
     ) else {
         return (track, tags);
     };
-    if let Some(t) = probed.format.default_track() {
+    // una traccia senza frequenza di campionamento è un video (H.264 di un MP4)
+    track.video = probed
+        .format
+        .tracks()
+        .iter()
+        .any(|t| t.codec_params.sample_rate.is_none());
+    // la durata dalla traccia audio, che in un video non è la prima
+    let audio = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.sample_rate.is_some());
+    if let Some(t) = audio {
         let p = &t.codec_params;
         if let (Some(n), Some(rate)) = (p.n_frames, p.sample_rate) {
             if rate > 0 {
@@ -1082,6 +1103,8 @@ mod tests {
         wav(&root.join("Sciolto.wav"));
         std::fs::write(album.join("3 - Terzo.opus"), b"x").unwrap();
         std::fs::write(album.join("copertina.jpg"), b"x").unwrap();
+        // un video (qui riconosciuto dall'estensione) si elenca, segnato come video
+        std::fs::write(album.join("4 - Il video.mkv"), b"x").unwrap();
 
         let lib = scan(&root, 64, &AtomicBool::new(false));
         assert_eq!(lib.unsupported, 1);
@@ -1092,7 +1115,8 @@ mod tests {
             .find(|a| a.name == "Il mio album")
             .unwrap();
         let titles: Vec<_> = a.tracks.iter().map(|t| t.title.as_str()).collect();
-        assert_eq!(titles, ["Primo", "Secondo"]);
+        assert_eq!(titles, ["Primo", "Secondo", "Il video"]);
+        assert!(!a.tracks[0].video && a.tracks[2].video);
         assert_eq!(a.tracks[0].number, Some(1));
         let d = a.tracks[0].duration.expect("durata letta dal file");
         assert!((d.as_secs_f32() - 1.0).abs() < 0.05, "{d:?}");
