@@ -96,6 +96,11 @@ enum Msg {
     Trashed(Result<PathBuf, String>),
     /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
     MusicAdded(Result<String, String>),
+    /// correzione di volume misurata per un brano (`None`: non misurabile)
+    Gain {
+        path: PathBuf,
+        gain: Option<f32>,
+    },
     /// brani dell'album `idx` della ricerca `seq`, per sceglierli
     Tracks {
         seq: u64,
@@ -223,6 +228,10 @@ pub struct App {
     tab: Tab,
     listen: ListenUi,
     engine: player::Engine,
+    /// correzioni già misurate per il volume uguale tra i brani
+    gains: player::GainCache,
+    /// misura i brani in sottofondo
+    analyzer: player::Analyzer,
     /// porta in vista l'elenco dei download al prossimo disegno («Vedi elenco», avvio)
     scroll_to_queue: bool,
     /// brani da fermare uno per uno («Annulla» sulla riga)
@@ -242,6 +251,13 @@ impl App {
         configure_style(&cc.egui_ctx);
         let logo = load_logo(&cc.egui_ctx);
         let (tx, rx) = channel();
+        let analyzer = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            player::Analyzer::start(move |path, gain| {
+                let _ = tx.send(Msg::Gain { path, gain });
+                ctx.request_repaint();
+            })
+        };
         let mut app = Self {
             cfg: Config::load(),
             input: String::new(),
@@ -267,6 +283,8 @@ impl App {
                 let ctx = cc.egui_ctx.clone();
                 player::Engine::start(move || ctx.request_repaint())
             },
+            gains: player::GainCache::load(Some(tools::data_dir().join("loudness.json"))),
+            analyzer,
             scroll_to_queue: false,
             stop: Default::default(),
             title: String::new(),
@@ -639,6 +657,14 @@ impl App {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Gain { path, gain } => {
+                // non misurabile: nessuna correzione, e non si riprova a ogni ascolto
+                let g = gain.unwrap_or(1.0);
+                self.gains.insert(&path, g);
+                if self.now_track().is_some_and(|t| t.path == path) {
+                    self.apply_gain();
+                }
+            }
             Msg::Tracks { seq, idx, tracks } => {
                 if seq == self.search.seq {
                     if let Some(p) = self.search.picks.get_mut(&idx) {
@@ -2561,6 +2587,14 @@ impl App {
         if self.listen.open.is_some_and(|i| i >= library.albums.len()) {
             self.listen.open = None;
         }
+        // i brani non ancora misurati, in sottofondo, uno alla volta
+        if self.cfg.normalize {
+            for t in library.albums.iter().flat_map(|a| &a.tracks) {
+                if self.gains.get(&t.path).is_none() {
+                    self.analyzer.later(&t.path);
+                }
+            }
+        }
         self.listen.library = Some(library);
         self.listen.busy = false;
         self.restore_last_track();
@@ -2569,6 +2603,22 @@ impl App {
     fn now_track(&self) -> Option<&player::Track> {
         let (a, t) = self.listen.now?;
         self.listen.library.as_ref()?.albums.get(a)?.tracks.get(t)
+    }
+
+    /// Correzione da usare per un brano (1 se il volume uguale è spento o non ancora misurato).
+    fn gain_for(&self, path: &std::path::Path) -> f32 {
+        if self.cfg.normalize {
+            self.gains.get(path).unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Aggiorna la correzione del brano in ascolto (dopo una misura o l'opzione cambiata).
+    fn apply_gain(&mut self) {
+        if let Some(path) = self.now_track().map(|t| t.path.clone()) {
+            self.engine.set_gain(self.gain_for(&path));
+        }
     }
 
     /// (album, brano) del file nella libreria.
@@ -2594,6 +2644,10 @@ impl App {
         };
         let path = t.path.clone();
         self.engine.set_volume(self.cfg.volume);
+        self.engine.set_gain(self.gain_for(&path));
+        if self.cfg.normalize && self.gains.get(&path).is_none() {
+            self.analyzer.urgent(&path);
+        }
         self.engine.play(&path);
         self.listen.now = Some((album, track));
         self.listen.seek_drag = None;
@@ -2634,6 +2688,12 @@ impl App {
         let Some(path) = self.listen.queue.get(self.listen.qpos).cloned() else {
             return;
         };
+        // il brano dopo si misura subito dopo quello in ascolto: sarà pronto quando parte
+        if let Some(next) = self.listen.queue.get(self.listen.qpos + 1) {
+            if self.cfg.normalize && self.gains.get(next).is_none() {
+                self.analyzer.urgent(next);
+            }
+        }
         match self.locate(&path) {
             Some((a, t)) => self.play_at(a, t),
             // il file non c'è più (cartella riletta): si passa al successivo
@@ -2782,6 +2842,7 @@ impl App {
         self.listen.qpos = t;
         self.listen.now = Some((a, t));
         self.engine.set_volume(self.cfg.volume);
+        self.engine.set_gain(self.gain_for(&path));
         self.engine
             .load_paused(&path, Duration::from_secs_f32(self.cfg.last_pos.max(0.0)));
     }
@@ -2868,6 +2929,7 @@ impl App {
         let mut play: Option<(usize, usize)> = None;
         let mut play_group: Option<Vec<usize>> = None;
         let mut add_music: Option<PathBuf> = None;
+        let mut toggle_norm = false;
         let mut confirm: Option<usize> = None;
         let mut open: Option<Option<usize>> = None;
         card(ui, |ui| {
@@ -2894,6 +2956,17 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                 );
             });
+            let mut norm = self.cfg.normalize;
+            if ui
+                .checkbox(&mut norm, tr!("Volume uguale tra i brani", "Same volume for all tracks"))
+                .on_hover_text(tr!(
+                    "Grabbit misura ogni brano (una volta, in sottofondo) e porta tutti allo stesso volume, senza toccare i file.",
+                    "Grabbit measures each track (once, in the background) and brings them all to the same volume, without changing the files."
+                ))
+                .changed()
+            {
+                toggle_norm = true;
+            }
             if self.listen.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -3188,6 +3261,21 @@ impl App {
         }
         if let Some(dir) = add_music {
             self.add_to_music(ctx, dir);
+        }
+        if toggle_norm {
+            self.cfg.normalize = !self.cfg.normalize;
+            self.cfg.save();
+            self.apply_gain();
+            // accesa ora: si misurano i brani che mancano
+            if self.cfg.normalize {
+                if let Some(lib) = &self.listen.library {
+                    for t in lib.albums.iter().flat_map(|a| &a.tracks) {
+                        if self.gains.get(&t.path).is_none() {
+                            self.analyzer.later(&t.path);
+                        }
+                    }
+                }
+            }
         }
         if confirm.is_some() {
             self.listen.confirm_trash = confirm;

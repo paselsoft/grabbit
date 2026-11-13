@@ -401,6 +401,214 @@ fn read_track(path: &Path) -> (Track, Tags) {
     (track, tags)
 }
 
+// ───────────────────────── volume uguale tra i brani ─────────────────────────
+
+/// Livello a cui si portano tutti i brani (dB di potenza media sui tratti non silenziosi):
+/// circa quello di ReplayGain. I master moderni, più forti, vengono abbassati.
+const TARGET_DB: f32 = -16.0;
+/// Correzione massima: quanto si alza un brano molto piano, quanto si abbassa uno forte.
+const MAX_BOOST_DB: f32 = 6.0;
+const MAX_CUT_DB: f32 = 15.0;
+
+/// Correzione di volume (moltiplicatore) per portare il brano al livello comune.
+/// Decodifica tutto il file: blocchi da 0,4 s, si scartano i silenzi (sotto -70 dB) e i
+/// tratti molto più piani della media (10 dB sotto), come in EBU R128 ma senza filtro K.
+/// Non alza mai il brano oltre il suo picco (niente distorsione).
+pub fn measure_gain(path: &Path) -> Option<f32> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::errors::Error;
+
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    hint.with_extension(&ext_of(path));
+    let mut probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = probed.format.default_track()?.clone();
+    let rate = track.codec_params.sample_rate.unwrap_or(44_100) as usize;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .ok()?;
+    let block = (rate * 2 / 5).max(1);
+    let (mut blocks, mut sum, mut frames, mut peak) = (Vec::<f64>::new(), 0f64, 0usize, 0f32);
+    let mut buf: Option<SampleBuffer<f32>> = None;
+    loop {
+        let packet = match probed.format.next_packet() {
+            Ok(p) => p,
+            Err(Error::IoError(_)) | Err(Error::ResetRequired) => break,
+            Err(_) => return None,
+        };
+        if packet.track_id() != track.id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(Error::DecodeError(_)) => continue,
+            Err(_) => break,
+        };
+        let spec = *decoded.spec();
+        let channels = spec.channels.count().max(1);
+        let b = buf.get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, spec));
+        if b.capacity() < decoded.capacity() * channels {
+            *b = SampleBuffer::new(decoded.capacity() as u64, spec);
+        }
+        b.copy_interleaved_ref(decoded);
+        for frame in b.samples().chunks(channels) {
+            let mut ms = 0f64;
+            for &x in frame {
+                peak = peak.max(x.abs());
+                ms += (x as f64) * (x as f64);
+            }
+            sum += ms / channels as f64;
+            frames += 1;
+            if frames == block {
+                blocks.push(sum / block as f64);
+                sum = 0.0;
+                frames = 0;
+            }
+        }
+    }
+    gain_from_blocks(&blocks, peak)
+}
+
+/// Correzione dal livello dei blocchi da 0,4 s (potenza media) e dal picco del brano.
+fn gain_from_blocks(blocks: &[f64], peak: f32) -> Option<f32> {
+    let db = |ms: f64| 10.0 * ms.max(1e-12).log10();
+    let loud: Vec<f64> = blocks.iter().copied().filter(|&m| db(m) > -70.0).collect();
+    if loud.is_empty() || peak <= 0.0 {
+        return None;
+    }
+    let mean = loud.iter().sum::<f64>() / loud.len() as f64;
+    let gate = db(mean) - 10.0;
+    let kept: Vec<f64> = loud.into_iter().filter(|&m| db(m) > gate).collect();
+    let level = db(kept.iter().sum::<f64>() / kept.len() as f64) as f32;
+    let gain_db = (TARGET_DB - level).clamp(-MAX_CUT_DB, MAX_BOOST_DB);
+    let gain = 10f32.powf(gain_db / 20.0);
+    // alzare sì, ma non oltre il picco: il brano non deve distorcere
+    Some(gain.min(0.99 / peak).max(10f32.powf(-MAX_CUT_DB / 20.0)))
+}
+
+/// Correzioni già misurate, salvate nella cartella dei dati: file → (data di modifica,
+/// dimensione, correzione). Se il file cambia, si rimisura.
+#[derive(Default)]
+pub struct GainCache {
+    path: Option<PathBuf>,
+    map: std::collections::HashMap<String, (u64, u64, f32)>,
+}
+
+fn file_stamp(p: &Path) -> Option<(u64, u64)> {
+    let m = std::fs::metadata(p).ok()?;
+    let mtime = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some((mtime, m.len()))
+}
+
+impl GainCache {
+    pub fn load(path: Option<PathBuf>) -> Self {
+        let map = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { path, map }
+    }
+
+    pub fn get(&self, file: &Path) -> Option<f32> {
+        let (mtime, len, gain) = *self.map.get(&file.to_string_lossy().to_string())?;
+        (file_stamp(file)? == (mtime, len)).then_some(gain)
+    }
+
+    pub fn insert(&mut self, file: &Path, gain: f32) {
+        if let Some((mtime, len)) = file_stamp(file) {
+            self.map
+                .insert(file.to_string_lossy().into_owned(), (mtime, len, gain));
+        }
+        if let Some(p) = &self.path {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(s) = serde_json::to_string(&self.map) {
+                let _ = std::fs::write(p, s);
+            }
+        }
+    }
+}
+
+/// Misura i brani in sottofondo, uno alla volta: prima quelli chiesti con `urgent`
+/// (il brano in ascolto e il successivo), poi gli altri.
+pub struct Analyzer {
+    queue: Arc<(
+        Mutex<std::collections::VecDeque<PathBuf>>,
+        std::sync::Condvar,
+    )>,
+}
+
+impl Analyzer {
+    /// `done(file, correzione)` arriva dal thread di sottofondo.
+    pub fn start(done: impl Fn(PathBuf, Option<f32>) + Send + 'static) -> Self {
+        let queue: Arc<(
+            Mutex<std::collections::VecDeque<PathBuf>>,
+            std::sync::Condvar,
+        )> = Default::default();
+        let q = queue.clone();
+        std::thread::spawn(move || loop {
+            let next = {
+                let (lock, cv) = &*q;
+                let Ok(mut g) = lock.lock() else { return };
+                while g.is_empty() {
+                    g = match cv.wait(g) {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    };
+                }
+                g.pop_front()
+            };
+            if let Some(p) = next {
+                let gain = measure_gain(&p);
+                done(p, gain);
+            }
+        });
+        Self { queue }
+    }
+
+    pub fn urgent(&self, file: &Path) {
+        self.push(file, true);
+    }
+
+    pub fn later(&self, file: &Path) {
+        self.push(file, false);
+    }
+
+    fn push(&self, file: &Path, front: bool) {
+        let (lock, cv) = &*self.queue;
+        if let Ok(mut q) = lock.lock() {
+            if let Some(i) = q.iter().position(|p| p == file) {
+                if !front {
+                    return;
+                }
+                q.remove(i);
+            }
+            if front {
+                q.push_front(file.to_path_buf());
+            } else {
+                q.push_back(file.to_path_buf());
+            }
+            cv.notify_one();
+        }
+    }
+}
+
 pub fn fmt_time(d: Duration) -> String {
     let s = d.as_secs();
     if s >= 3600 {
@@ -420,6 +628,8 @@ enum Cmd {
     Stop,
     Seek(Duration),
     Volume(f32),
+    /// correzione per il volume uguale tra i brani (si moltiplica al volume)
+    Gain(f32),
 }
 
 /// Stato del player, letto dall'interfaccia.
@@ -451,6 +661,7 @@ impl Engine {
             let mut sink: Option<rodio::MixerDeviceSink> = None;
             let mut player: Option<rodio::Player> = None;
             let mut volume = 1.0f32;
+            let mut gain = 1.0f32;
             let set = |f: &dyn Fn(&mut Status)| {
                 if let Ok(mut s) = st.lock() {
                     f(&mut s);
@@ -488,7 +699,7 @@ impl Engine {
                         match (decoded, sink.as_ref()) {
                             (Ok(dec), Some(s)) => {
                                 let p = rodio::Player::connect_new(s.mixer());
-                                p.set_volume(volume);
+                                p.set_volume(volume * gain);
                                 // in pausa prima di aggiungere il brano: non si sente nulla
                                 if paused {
                                     p.pause();
@@ -549,7 +760,13 @@ impl Engine {
                     Ok(Cmd::Volume(v)) => {
                         volume = v;
                         if let Some(p) = &player {
-                            p.set_volume(v);
+                            p.set_volume(volume * gain);
+                        }
+                    }
+                    Ok(Cmd::Gain(g)) => {
+                        gain = g;
+                        if let Some(p) = &player {
+                            p.set_volume(volume * gain);
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {}
@@ -602,6 +819,10 @@ impl Engine {
     }
     pub fn set_volume(&self, v: f32) {
         let _ = self.tx.send(Cmd::Volume(v.clamp(0.0, 1.0)));
+    }
+    /// Correzione del brano per il volume uguale (1 = nessuna).
+    pub fn set_gain(&self, g: f32) {
+        let _ = self.tx.send(Cmd::Gain(g.clamp(0.05, 2.0)));
     }
 }
 
@@ -674,6 +895,67 @@ mod tests {
             .map(|t| t.path.to_string_lossy().into_owned())
             .collect();
         assert_eq!(order, ["y", "x", "a", "b"]);
+    }
+
+    #[test]
+    fn loud_and_quiet_tracks_get_opposite_corrections() {
+        // brano forte (potenza media -8 dB): va abbassato di 8 dB
+        let loud = vec![10f64.powf(-0.8); 100];
+        let g = gain_from_blocks(&loud, 0.9).unwrap();
+        assert!((20.0 * g.log10() - (-8.0)).abs() < 0.1, "{g}");
+        // brano piano (-30 dB): si alzerebbe di 14, ma al massimo di 6 dB
+        let quiet = vec![10f64.powf(-3.0); 100];
+        let g = gain_from_blocks(&quiet, 0.1).unwrap();
+        assert!((20.0 * g.log10() - MAX_BOOST_DB).abs() < 0.1, "{g}");
+        // ...e mai oltre il picco: con picco 0,9 non si può alzare di 6 dB
+        let g = gain_from_blocks(&quiet, 0.9).unwrap();
+        assert!(g * 0.9 <= 1.0, "{g}");
+        // i silenzi non contano; tutto silenzio: nessuna misura
+        let mut with_silence = loud.clone();
+        with_silence.extend(vec![0.0; 300]);
+        let g2 = gain_from_blocks(&with_silence, 0.9).unwrap();
+        assert!((g2 - gain_from_blocks(&loud, 0.9).unwrap()).abs() < 1e-4);
+        assert_eq!(gain_from_blocks(&[0.0; 10], 0.0), None);
+    }
+
+    /// Un WAV vero: un'onda a metà volume si misura e si salva nell'archivio.
+    #[test]
+    fn a_real_file_is_measured_and_cached() {
+        let dir = std::env::temp_dir().join(format!("grabbit-gain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("onda.wav");
+        let rate = 8000u32;
+        let mut data = Vec::new();
+        for i in 0..rate * 2 {
+            let x = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5;
+            data.extend_from_slice(&((x * i16::MAX as f32) as i16).to_le_bytes());
+        }
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&data);
+        std::fs::write(&wav, b).unwrap();
+        // sinusoide di ampiezza 0,5: potenza media 0,125 = -9 dB → circa -7 dB di correzione
+        let g = measure_gain(&wav).expect("misura");
+        let db = 20.0 * g.log10();
+        assert!((db - (-7.0)).abs() < 0.5, "{db}");
+        let cache_file = dir.join("loudness.json");
+        let mut cache = GainCache::load(Some(cache_file.clone()));
+        cache.insert(&wav, g);
+        let again = GainCache::load(Some(cache_file));
+        assert_eq!(again.get(&wav), Some(g));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

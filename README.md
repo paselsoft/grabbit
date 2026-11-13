@@ -26,7 +26,9 @@ The interface is in Italian if your system language is Italian, and in English o
   artist, album or track; tracks in track order, play/pause, previous/next, a bar to move within the
   track and volume, **Shuffle** and **Repeat** (all or the track), space bar and arrow keys,
   "Play all" for an artist; when reopened it resumes the last track. In search results, what you
-  already have is marked "Already in the library". MP3, M4A, FLAC, WAV and OGG (not Opus).
+  already have is marked "Already in the library". **Same volume for all tracks** (measured once
+  per track, files untouched); for each album "Show in Finder", "Add to Music" and "Move to Trash…".
+- **Choose the tracks** of an album before downloading it, with checkboxes. MP3, M4A, FLAC, WAV and OGG (not Opus).
 - **Several downloads at once** (3 by default, 1 to 4 in the advanced options): an album is split
   into its tracks, downloaded in parallel, with the track number also in the metadata.
 - **Playlists**: files go into a folder named after the playlist and are called

@@ -58,6 +58,8 @@ pub struct Config {
     /// ultimo brano ascoltato e posizione in secondi: alla riapertura si riprende da lì
     pub last_track: Option<PathBuf>,
     pub last_pos: f32,
+    /// volume uguale tra i brani (correzione misurata per ogni brano)
+    pub normalize: bool,
 }
 
 impl Default for Config {
@@ -91,6 +93,7 @@ impl Default for Config {
             repeat: Repeat::Off,
             last_track: None,
             last_pos: 0.0,
+            normalize: true,
         }
     }
 }

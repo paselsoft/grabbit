@@ -26,7 +26,10 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   per cercare artista, album o brano; i brani in ordine di traccia, riproduci/pausa, precedente/successivo,
   barra per spostarsi nel brano e volume, **Casuale** e **Ripeti** (tutto o il brano), barra
   spaziatrice e frecce, «Ascolta tutto» per un artista; alla riapertura riprende dall'ultimo brano.
-  Nei risultati della ricerca, ciò che hai già è segnato «Già nella libreria». MP3, M4A, FLAC, WAV e OGG (Opus no).
+  Nei risultati della ricerca, ciò che hai già è segnato «Già nella libreria».
+  **Volume uguale tra i brani** (misurato una volta per brano, senza toccare i file); per ogni
+  album «Mostra nel Finder», «Aggiungi a Musica» e «Sposta nel Cestino…».
+- **Scegli i brani** di un album prima di scaricarlo, con le caselle. MP3, M4A, FLAC, WAV e OGG (Opus no).
 - **Più download insieme** (di serie 3, da 1 a 4 nelle opzioni avanzate): un album si divide nei
   suoi brani, scaricati in parallelo, con il numero del brano anche nei metadati.
 - **Playlist**: i file vanno in una cartella con il nome della playlist e si chiamano
