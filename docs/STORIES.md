@@ -148,7 +148,7 @@ Accettazione:
 - [snap] I pulsanti sotto «Ascolta l'album»; niente Cestino per i «Brani sciolti».
 - [snap] La conferma nomina l'album; dopo, la cartella è nel Cestino e l'elenco si aggiorna con «“…” è nel Cestino.».
 - [manual] Sul Mac: «Aggiungi a iTunes» importa l'album; dal Cestino «Ripristina» lo rimette a posto.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-013 Scegliere i brani di un album prima di scaricarlo
 Come utente, negli album dei risultati premo «Scegli i brani…», tolgo la spunta a quelli che
@@ -157,7 +157,7 @@ Accettazione:
 - [unit] Solo i brani scelti si scaricano, come «01 - …» e «03 - …».
 - [snap] L'elenco con le caselle, «Tutti», «Nessuno» e «Scarica i brani scelti (N)».
 - [manual] Sul Mac, con un album vero di YouTube Music.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-014 Ascoltare tutti i brani allo stesso volume
 Come utente, con «Volume uguale tra i brani» (attivo di serie) i brani di album diversi
@@ -167,7 +167,7 @@ Accettazione:
 - [unit] Un file vero si misura e la misura resta nell'archivio.
 - [snap] La casella in «Ascolta»; i brani della libreria si misurano in sottofondo.
 - [manual] Sul Mac, passando da un album vecchio a uno recente il volume resta simile.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-015 Guardare un video musicale dalla libreria
 Come utente, un video musicale scaricato compare in «Ascolta» segnato «Video» e, cliccandolo,
@@ -176,4 +176,4 @@ Accettazione:
 - [unit] Un file video (MP4 con una traccia video, MKV, MOV, M4V) è segnato come video; la durata viene dalla traccia audio.
 - [snap] La riga mostra «Video» e la durata; «Ascolta l'album», Casuale e «Ascolta tutto» saltano i video.
 - [manual] Sul Mac il video si apre in QuickTime e la musica di Grabbit si mette in pausa.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
