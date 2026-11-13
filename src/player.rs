@@ -44,6 +44,8 @@ pub struct Album {
     pub year: Option<u32>,
     /// brani direttamente nella cartella della musica, fuori dagli album
     pub loose: bool,
+    /// cartella dell'album (per i brani sciolti, la cartella della musica)
+    pub dir: PathBuf,
     pub tracks: Vec<Track>,
     /// copertina già rimpicciolita: larghezza, altezza, pixel RGBA
     pub cover: Option<(u32, u32, Vec<u8>)>,
@@ -103,6 +105,7 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
         }
         let mut album = Album {
             loose: dir == root,
+            dir: dir.clone(),
             name: if dir == root {
                 tr!("Brani sciolti", "Loose tracks").into()
             } else {

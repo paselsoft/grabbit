@@ -92,6 +92,10 @@ enum Msg {
         idx: usize,
         image: egui::ColorImage,
     },
+    /// album spostato nel Cestino (o errore)
+    Trashed(Result<PathBuf, String>),
+    /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
+    MusicAdded(Result<String, String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -617,6 +621,48 @@ impl App {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Trashed(Ok(dir)) => {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.listen.notice = Some((
+                    tr!(
+                        format!("«{name}» è nel Cestino."),
+                        format!("“{name}” is in the Trash.")
+                    ),
+                    false,
+                ));
+                self.listen.open = None;
+                self.start_scan(ctx);
+            }
+            Msg::Trashed(Err(e)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("Non sono riuscito a spostarlo nel Cestino: {e}"),
+                        format!("Could not move it to the Trash: {e}")
+                    ),
+                    true,
+                ))
+            }
+            Msg::MusicAdded(Ok(name)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("«{name}» aggiunto a {}.", music_app()),
+                        format!("“{name}” added to {}.", music_app())
+                    ),
+                    false,
+                ))
+            }
+            Msg::MusicAdded(Err(e)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("{} non ha aggiunto l'album: {e}", music_app()),
+                        format!("{} did not add the album: {e}", music_app())
+                    ),
+                    true,
+                ))
+            }
             Msg::PlayerDir(p) => {
                 self.cfg.player_dir = Some(p);
                 self.cfg.save();
@@ -732,8 +778,11 @@ impl App {
                     self.notify_finished(ctx);
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
-                    // con dei risultati sullo schermo, «Già nella libreria» va aggiornato subito
-                    if !self.search.results.is_empty() && !self.listen.busy {
+                    // la libreria già letta (o «Già nella libreria» nei risultati) si aggiorna
+                    // subito, senza premere «Aggiorna»
+                    if (self.listen.library.is_some() || !self.search.results.is_empty())
+                        && !self.listen.busy
+                    {
                         self.start_scan(ctx);
                     }
                 }
@@ -2270,6 +2319,10 @@ struct ListenUi {
     restored: bool,
     /// quando è stata salvata l'ultima posizione nel brano
     last_save: Option<std::time::Instant>,
+    /// album da confermare prima di spostarlo nel Cestino
+    confirm_trash: Option<usize>,
+    /// esito dell'ultima azione sulla libreria (Cestino, Musica): testo, è un errore
+    notice: Option<(String, bool)>,
 }
 
 /// Icone dei pulsanti del player, disegnate (i caratteri ▶ ⏸ non ci sono nei font di serie).
@@ -2748,6 +2801,8 @@ impl App {
         let mut rescan = false;
         let mut play: Option<(usize, usize)> = None;
         let mut play_group: Option<Vec<usize>> = None;
+        let mut add_music: Option<PathBuf> = None;
+        let mut confirm: Option<usize> = None;
         let mut open: Option<Option<usize>> = None;
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2817,6 +2872,13 @@ impl App {
                             tr!("Cerca nella libreria", "Search the library"),
                         )
                     });
+                    if let Some((text, err)) = &self.listen.notice {
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(if *err { ERR } else { OK }),
+                        );
+                    }
                     ui.add_space(6.0);
                     let needle = self.listen.filter.trim().to_lowercase();
                     let shown: Vec<usize> = (0..lib.albums.len())
@@ -2940,8 +3002,43 @@ impl App {
                             if ui.add(btn).clicked() {
                                 play = Some((ai, 0));
                             }
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .small_button(reveal_label())
+                                    .on_hover_text(a.dir.display().to_string())
+                                    .clicked()
+                                {
+                                    reveal(&a.dir);
+                                }
+                                if cfg!(target_os = "macos")
+                                    && ui
+                                        .small_button(music_app_label())
+                                        .on_hover_text(tr!(
+                                            "Aggiunge l'album alla libreria dell'app Musica (iTunes sui Mac meno recenti)",
+                                            "Adds the album to the Music app library (iTunes on older Macs)"
+                                        ))
+                                        .clicked()
+                                {
+                                    add_music = Some(a.dir.clone());
+                                }
+                                // i brani sciolti stanno nella cartella della musica: mai nel Cestino
+                                if !a.loose
+                                    && ui
+                                        .small_button(tr!("Sposta nel Cestino…", "Move to Trash…"))
+                                        .clicked()
+                                {
+                                    confirm = Some(ai);
+                                }
+                            });
                         });
                     });
+                    if let Some((text, err)) = &self.listen.notice {
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(if *err { ERR } else { OK }),
+                        );
+                    }
                     ui.add_space(6.0);
                     for (ti, t) in a.tracks.iter().enumerate() {
                         let current = self.listen.now == Some((ai, ti));
@@ -3013,6 +3110,7 @@ impl App {
         }
         if let Some(o) = open {
             self.listen.open = o;
+            self.listen.notice = None;
         }
         if let Some((a, t)) = play {
             self.play_album_from(a, t);
@@ -3022,6 +3120,114 @@ impl App {
             self.play_albums(&albums);
             ctx.request_repaint();
         }
+        if let Some(dir) = add_music {
+            self.add_to_music(ctx, dir);
+        }
+        if confirm.is_some() {
+            self.listen.confirm_trash = confirm;
+        }
+        self.trash_dialog(ctx);
+    }
+
+    /// Conferma prima di spostare un album nel Cestino (si può ripristinare dal Cestino).
+    fn trash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(ai) = self.listen.confirm_trash else {
+            return;
+        };
+        let Some((name, dir)) = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(ai))
+            .filter(|a| !a.loose)
+            .map(|a| (a.name.clone(), a.dir.clone()))
+        else {
+            self.listen.confirm_trash = None;
+            return;
+        };
+        let mut go = false;
+        let mut close = false;
+        let resp = egui::Modal::new(egui::Id::unique("trash_album")).show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.label(
+                RichText::new(tr!(
+                    format!("Spostare «{name}» nel Cestino?"),
+                    format!("Move “{name}” to the Trash?")
+                ))
+                .strong(),
+            );
+            ui.label(
+                RichText::new(tr!(
+                    "La cartella dell'album va nel Cestino, con tutti i suoi brani. Se cambi idea, la ripristini dal Cestino.",
+                    "The album folder goes to the Trash with all its tracks. If you change your mind, restore it from the Trash."
+                ))
+                .small(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    RichText::new(tr!("Sposta nel Cestino", "Move to Trash")).color(Color32::WHITE),
+                )
+                .fill(ERR);
+                if ui.add(btn).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    go = true;
+                }
+                if ui.button(tr!("Annulla", "Cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if resp.should_close() || close {
+            self.listen.confirm_trash = None;
+        }
+        if go {
+            self.listen.confirm_trash = None;
+            // se suona un brano di questo album, si ferma prima di spostarlo
+            if self.now_track().is_some_and(|t| t.path.starts_with(&dir)) {
+                self.engine.stop();
+                self.listen.now = None;
+                self.cfg.last_track = None;
+                self.cfg.save();
+            }
+            let send = self.sender(ctx);
+            thread::spawn(move || {
+                let r = trash::delete(&dir).map(|_| dir).map_err(|e| e.to_string());
+                send(Msg::Trashed(r));
+            });
+        }
+    }
+
+    /// «Aggiungi a Musica»: l'app Musica (o iTunes) importa la cartella dell'album.
+    fn add_to_music(&mut self, ctx: &egui::Context, dir: PathBuf) {
+        self.listen.notice = Some((
+            tr!("Aggiungo l'album a Musica…", "Adding the album to Music…").into(),
+            false,
+        ));
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let script = format!(
+                "tell application {} to add (POSIX file {})",
+                applescript_quote(music_app()),
+                applescript_quote(&dir.to_string_lossy())
+            );
+            let r = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(name)
+                    } else {
+                        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+                    }
+                });
+            send(Msg::MusicAdded(r));
+        });
     }
 
     /// Barra in basso con il brano in ascolto: comandi, posizione e volume.
@@ -3398,6 +3604,23 @@ fn reveal(file: &std::path::Path) {
         let _ = std::process::Command::new("explorer").arg(arg).spawn();
     } else if let Some(dir) = file.parent() {
         open_folder(dir);
+    }
+}
+
+/// L'app della musica del Mac: «Music» da Catalina (10.15), prima «iTunes».
+fn music_app() -> &'static str {
+    if std::path::Path::new("/System/Applications/Music.app").exists() {
+        "Music"
+    } else {
+        "iTunes"
+    }
+}
+
+fn music_app_label() -> &'static str {
+    if music_app() == "Music" {
+        tr!("Aggiungi a Musica", "Add to Music")
+    } else {
+        tr!("Aggiungi a iTunes", "Add to iTunes")
     }
 }
 
