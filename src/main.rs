@@ -53,7 +53,7 @@ mod tests {
     /// I font di serie di egui non hanno questi simboli: sullo schermo diventano quadratini.
     #[test]
     fn ui_text_has_no_missing_glyphs() {
-        const MISSING: &[char] = &['→', '←', '✓', '✔', '⏸', '⏮', '⏭'];
+        const MISSING: &[char] = &['→', '←', '✓', '✔', '⏸', '⏮', '⏭', '▶', '♫'];
         for (name, src) in [
             ("app.rs", include_str!("app.rs")),
             ("downloader.rs", include_str!("downloader.rs")),

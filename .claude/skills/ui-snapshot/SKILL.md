@@ -35,12 +35,16 @@ ridà il focus alla finestra, come tornare su Grabbit dal browser).
 
 - Lo schermo è 1000x1000; la finestra (780x780) è in alto a sinistra. Fai
   sempre prima un `shot:` e leggi le coordinate dall'immagine, poi clicca.
+- `--home CARTELLA` tiene configurazione e dati tra due avvii (per provare cosa Grabbit
+  ricorda, come l'ultimo brano); di serie la cartella è temporanea e si cancella.
+- `--search FILE` dà al finto yt-dlp dei risultati di ricerca: una riga JSON per risultato,
+  per esempio `{"id":"aaaaaaaaaa1","title":"Brano 2","channel":"Adele","url":"https://www.youtube.com/watch?v=aaaaaaaaaa1"}`.
 - Coordinate utili con la finestra di serie: scheda «Scarica» (55,94),
   scheda «Ascolta» (155,94). Il primo album della libreria è intorno a (150,230),
   le righe successive ogni 67 px.
 - Configurazione, dati e strumenti stanno in una cartella temporanea: la
-  configurazione vera non viene toccata. La ricerca non funziona (YouTube non è
-  raggiungibile); un download finge di durare 10 s con l'avanzamento, così si
+  configurazione vera non viene toccata. La ricerca dà solo i risultati di `--search`
+  (YouTube non è raggiungibile); un download finge di durare 10 s con l'avanzamento, così si
   vedono barra dei download ed elenco mentre lavorano (scatta 3-4 s dopo «Scarica»).
 - L'audio va su un'uscita ALSA muta che suona molto più veloce del tempo reale:
   un brano di 30 s finisce in un paio di secondi. Per fotografare la barra del
