@@ -88,7 +88,7 @@ Accettazione:
 - [unit] «Annulla» su un brano ferma solo quello; «Riprova» lo riscarica con la stessa cartella e lo stesso nome.
 - [snap] Righe in corso con «Annulla», finite con «Mostra nel Finder» (su Linux «Apri la cartella»), annullate con «Riprova»; in basso «Riprova i non riusciti (N)».
 - [manual] Sul Mac «Mostra nel Finder» apre il Finder con il file selezionato.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-007 Sapere quando il download è finito
 Come utente, se Grabbit è in secondo piano, a fine download ricevo una notifica e l'icona
@@ -96,7 +96,7 @@ nel Dock saltella; durante il download il titolo della finestra mostra la percen
 Accettazione:
 - [manual] Sul Mac, con un'altra app davanti: notifica «Download finito: N scaricati» e icona che saltella.
 - [manual] Il titolo della finestra è «Grabbit — 45%» durante il download, «Grabbit» alla fine.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-008 Aggiungere il link appena copiato
 Come utente, quando torno su Grabbit dopo aver copiato un link YouTube o Spotify, Grabbit
@@ -104,7 +104,7 @@ me lo propone con «Aggiungi» e «No, grazie».
 Accettazione:
 - [unit] Si propone solo un link YouTube, YouTube Music o Spotify, da solo; non un testo qualsiasi.
 - [snap] L'avviso compare nel riquadro «Link»; «Aggiungi» mette il link nel campo, «No, grazie» lo chiude.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-009 Vedere le copertine senza deformazioni
 Come utente, in «Ascolta» le copertine sono quadrate, senza bande e non schiacciate.
@@ -112,4 +112,4 @@ Accettazione:
 - [unit] Una copertina 16:9 di YouTube diventa il quadrato centrale.
 - [unit] Per l'audio yt-dlp salva nei file la copertina già quadrata (filtro crop di ffmpeg).
 - [manual] Sul Mac «25» e «19» di Adele hanno la copertina giusta.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
