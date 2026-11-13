@@ -113,6 +113,64 @@ pub struct Job {
     /// cartella dell'artista dai metadati del brano (yt-dlp): `subdir` è allora l'album
     /// dentro quella cartella
     artist_from_tags: bool,
+    /// album di cui scaricare solo alcuni brani (posizioni nella playlist, da 1)
+    pick: Option<Vec<usize>>,
+}
+
+/// Separa il link di un album dai brani scelti in una riga di `run` (vedi `pick_input`).
+const PICK_SEP: char = '\u{1f}';
+
+/// Riga da passare a `run` per scaricare solo alcuni brani di un album: il link, un
+/// separatore invisibile e le posizioni dei brani («1,3,5»).
+pub fn pick_input(url: &str, tracks: &[usize]) -> String {
+    let list: Vec<String> = tracks.iter().map(|n| n.to_string()).collect();
+    format!("{url}{PICK_SEP}{}", list.join(","))
+}
+
+/// Link e brani scelti di una riga di `run`.
+fn split_pick(line: &str) -> (String, Option<Vec<usize>>) {
+    match line.split_once(PICK_SEP) {
+        Some((url, list)) => (
+            url.to_string(),
+            Some(
+                list.split(',')
+                    .filter_map(|n| n.trim().parse().ok())
+                    .collect(),
+            ),
+        ),
+        None => (line.to_string(), None),
+    }
+}
+
+/// Elenco dei brani di un album o di una playlist, per sceglierli prima di scaricare:
+/// (titolo, [(posizione, titolo del brano)]).
+pub fn list_tracks(
+    url: &str,
+    cfg: &Config,
+    tools: &Toolset,
+    cancel: &AtomicBool,
+) -> Option<(String, Vec<(usize, String)>)> {
+    let job = Job {
+        id: 0,
+        target: url.to_string(),
+        label: url.to_string(),
+        out_name: None,
+        subdir: None,
+        audio_only: false,
+        track: None,
+        artist_from_tags: false,
+        pick: None,
+    };
+    let cfg = Config {
+        playlist: true,
+        ..cfg.clone()
+    };
+    let l = list_playlist(&job, &cfg, tools, cancel)?;
+    let title = crate::search::clean_name(&l.title);
+    Some((
+        title,
+        l.entries.into_iter().map(|e| (e.index, e.title)).collect(),
+    ))
 }
 
 /// Toglie i caratteri non ammessi nei nomi file.
@@ -266,6 +324,7 @@ pub fn run(
                             audio_only: true,
                             track: None,
                             artist_from_tags: false,
+                            pick: None,
                         });
                         next += 1;
                     }
@@ -285,10 +344,12 @@ pub fn run(
                 }
             }
         } else {
+            let (target, pick) = split_pick(&line);
             jobs.push(Job {
                 id: next,
-                target: line.clone(),
-                label: line,
+                label: target.clone(),
+                target,
+                pick,
                 out_name: None,
                 subdir: None,
                 audio_only: false,
@@ -312,7 +373,7 @@ pub fn run(
         if cancel.load(Ordering::Relaxed)
             || job.out_name.is_some()
             || job.subdir.is_some()
-            || looks_like_single_video(&job.target)
+            || (job.pick.is_none() && looks_like_single_video(&job.target))
         {
             queue.push(job);
             continue;
@@ -330,8 +391,30 @@ pub fn run(
             info,
         }) = list_playlist(&job, &cfg, &tools, &cancel)
         else {
-            queue.push(job);
+            if job.pick.is_some() {
+                // senza l'elenco non si sa quali brani scaricare: meglio non scaricare tutto
+                emit(Event::JobFinished {
+                    id: job.id,
+                    ok: false,
+                    detail: tr!(
+                        "Non riesco a leggere i brani dell'album: riprova",
+                        "Could not read the album's tracks: try again"
+                    )
+                    .into(),
+                    file: None,
+                });
+            } else {
+                queue.push(job);
+            }
             continue;
+        };
+        // solo i brani scelti, con il loro numero nell'album
+        let entries: Vec<Entry> = match &job.pick {
+            Some(p) => entries
+                .into_iter()
+                .filter(|e| p.contains(&e.index))
+                .collect(),
+            None => entries,
         };
         // «Album - Titolo» (così lo chiama YouTube) → «Titolo»
         let album = sanitize(&crate::search::clean_name(&title));
@@ -379,6 +462,7 @@ pub fn run(
                 audio_only: job.audio_only,
                 track: Some(e.index),
                 artist_from_tags: music_album && artist.is_none(),
+                pick: None,
             };
             next += 1;
             emit(Event::JobAdded {
@@ -1118,6 +1202,7 @@ mod tests {
             audio_only,
             track: None,
             artist_from_tags: false,
+            pick: None,
         }
     }
 
@@ -1429,6 +1514,84 @@ esac
             "{m1}"
         );
         assert!(m1.contains("1 - Pezzo 1.%(ext)s"), "{m1}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Solo i brani scelti di un album, con il loro numero nell'album.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_chosen_tracks_are_downloaded() {
+        let _guard = fake_ytdlp_lock();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("grabbit-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls.log");
+        let fake = dir.join("fake-yt-dlp");
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/bin/sh
+echo "$*" >> "{log}"
+case " $* " in *" --flat-playlist "*)
+  for i in 1 2 3 4; do echo "{{\"id\":\"v$i\",\"url\":\"https://x.test/watch?v=p$i\",\"title\":\"Brano $i\",\"channel\":\"Mina - Topic\",\"playlist_title\":\"Album - Studio Uno\",\"playlist_id\":\"OLAK5uy_x\",\"playlist_index\":$i}}"; done
+  exit 0;;
+esac
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = Toolset {
+            ytdlp: fake,
+            ffmpeg_dir: None,
+            js: None,
+        };
+        let cfg = Config {
+            mode: Mode::Audio,
+            out_dir: dir.clone(),
+            ..Config::default()
+        };
+        // l'elenco per scegliere
+        let (title, tracks) = list_tracks(
+            "https://music.youtube.com/playlist?list=OLAK5uy_x",
+            &cfg,
+            &tools,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(title, "Studio Uno");
+        assert_eq!(tracks.len(), 4);
+        assert_eq!(tracks[2], (3, "Brano 3".to_string()));
+        // scaricati solo l'1 e il 3
+        std::fs::remove_file(&log).unwrap();
+        run(
+            vec![pick_input(
+                "https://music.youtube.com/playlist?list=OLAK5uy_x",
+                &[1, 3],
+            )],
+            cfg,
+            tools,
+            0,
+            Arc::new(|_| {}),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            StopSet::default(),
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let downloads: Vec<&str> = calls
+            .lines()
+            .filter(|l| !l.contains("--flat-playlist"))
+            .collect();
+        assert_eq!(downloads.len(), 2, "{calls}");
+        assert!(downloads
+            .iter()
+            .any(|l| l.ends_with("watch?v=p1") && l.contains("01 - Brano 1.%(ext)s")));
+        assert!(downloads
+            .iter()
+            .any(|l| l.ends_with("watch?v=p3") && l.contains("03 - Brano 3.%(ext)s")));
+        assert_eq!(split_pick("https://a"), ("https://a".to_string(), None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -39,6 +39,8 @@ ridà il focus alla finestra, come tornare su Grabbit dal browser).
   ricorda, come l'ultimo brano); di serie la cartella è temporanea e si cancella.
 - `--search FILE` dà al finto yt-dlp dei risultati di ricerca: una riga JSON per risultato,
   per esempio `{"id":"aaaaaaaaaa1","title":"Brano 2","channel":"Adele","url":"https://www.youtube.com/watch?v=aaaaaaaaaa1"}`.
+- `--tracks FILE` dà al finto yt-dlp i brani di un album (per «Scegli i brani…»): righe JSON
+  con `title`, `url`, `playlist_title` e `playlist_index`.
 - Coordinate utili con la finestra di serie: scheda «Scarica» (55,94),
   scheda «Ascolta» (155,94). Il primo album della libreria è intorno a (150,230),
   le righe successive ogni 67 px.

@@ -136,3 +136,44 @@ Accettazione:
 - [snap] Dopo un riavvio la barra mostra l'ultimo brano in pausa alla posizione salvata, con le stesse scelte di Casuale e Ripeti.
 - [manual] Sul Mac: spazio mette in pausa, le frecce cambiano brano, «Ripeti tutto» ricomincia l'album.
 Stato: fatta
+
+## Milestone 5: libreria e ascolto curati (0.7.0)
+
+S-012, S-013, S-014
+
+### S-012 Gestire un album da «Ascolta»
+Come utente, nella pagina di un album ho «Mostra nel Finder», «Aggiungi a Musica» (iTunes sui
+Mac meno recenti) e «Sposta nel Cestino…», che chiede conferma.
+Accettazione:
+- [snap] I pulsanti sotto «Ascolta l'album»; niente Cestino per i «Brani sciolti».
+- [snap] La conferma nomina l'album; dopo, la cartella è nel Cestino e l'elenco si aggiorna con «“…” è nel Cestino.».
+- [manual] Sul Mac: «Aggiungi a iTunes» importa l'album; dal Cestino «Ripristina» lo rimette a posto.
+Stato: fatta
+
+### S-013 Scegliere i brani di un album prima di scaricarlo
+Come utente, negli album dei risultati premo «Scegli i brani…», tolgo la spunta a quelli che
+non voglio e scarico solo gli altri, con il loro numero nell'album.
+Accettazione:
+- [unit] Solo i brani scelti si scaricano, come «01 - …» e «03 - …».
+- [snap] L'elenco con le caselle, «Tutti», «Nessuno» e «Scarica i brani scelti (N)».
+- [manual] Sul Mac, con un album vero di YouTube Music.
+Stato: fatta
+
+### S-014 Ascoltare tutti i brani allo stesso volume
+Come utente, con «Volume uguale tra i brani» (attivo di serie) i brani di album diversi
+suonano allo stesso volume, senza che i file vengano toccati.
+Accettazione:
+- [unit] Un brano forte si abbassa, uno piano si alza (al massimo 6 dB e mai oltre il picco); i silenzi non contano.
+- [unit] Un file vero si misura e la misura resta nell'archivio.
+- [snap] La casella in «Ascolta»; i brani della libreria si misurano in sottofondo.
+- [manual] Sul Mac, passando da un album vecchio a uno recente il volume resta simile.
+Stato: fatta
+
+### S-015 Guardare un video musicale dalla libreria
+Come utente, un video musicale scaricato compare in «Ascolta» segnato «Video» e, cliccandolo,
+si apre nel player video del computer (QuickTime sul Mac).
+Accettazione:
+- [unit] Un file video (MP4 con una traccia video, MKV, MOV, M4V) è segnato come video; la durata viene dalla traccia audio.
+- [snap] La riga mostra «Video» e la durata; «Ascolta l'album», Casuale e «Ascolta tutto» saltano i video.
+- [manual] Sul Mac il video si apre in QuickTime e la musica di Grabbit si mette in pausa.
+Stato: fatta

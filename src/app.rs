@@ -92,6 +92,21 @@ enum Msg {
         idx: usize,
         image: egui::ColorImage,
     },
+    /// album spostato nel Cestino (o errore)
+    Trashed(Result<PathBuf, String>),
+    /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
+    MusicAdded(Result<String, String>),
+    /// correzione di volume misurata per un brano (`None`: non misurabile)
+    Gain {
+        path: PathBuf,
+        gain: Option<f32>,
+    },
+    /// brani dell'album `idx` della ricerca `seq`, per sceglierli
+    Tracks {
+        seq: u64,
+        idx: usize,
+        tracks: Option<Vec<(usize, String)>>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -141,6 +156,16 @@ impl ReleaseFilter {
     }
 }
 
+/// Brani di un album nei risultati, da scegliere prima di scaricarlo.
+#[derive(Default)]
+struct Pick {
+    open: bool,
+    loading: bool,
+    /// posizione nell'album, titolo, spuntato
+    tracks: Vec<(usize, String, bool)>,
+    error: bool,
+}
+
 #[derive(Default)]
 struct SearchUi {
     query: String,
@@ -162,6 +187,8 @@ struct SearchUi {
     notice: Option<String>,
     /// discografia di un artista: quali uscite mostrare (come i filtri di YouTube Music)
     release_filter: ReleaseFilter,
+    /// «Scegli i brani…» degli album (indice del risultato)
+    picks: std::collections::HashMap<usize, Pick>,
 }
 
 #[derive(Default)]
@@ -201,6 +228,10 @@ pub struct App {
     tab: Tab,
     listen: ListenUi,
     engine: player::Engine,
+    /// correzioni già misurate per il volume uguale tra i brani
+    gains: player::GainCache,
+    /// misura i brani in sottofondo
+    analyzer: player::Analyzer,
     /// porta in vista l'elenco dei download al prossimo disegno («Vedi elenco», avvio)
     scroll_to_queue: bool,
     /// brani da fermare uno per uno («Annulla» sulla riga)
@@ -220,6 +251,13 @@ impl App {
         configure_style(&cc.egui_ctx);
         let logo = load_logo(&cc.egui_ctx);
         let (tx, rx) = channel();
+        let analyzer = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            player::Analyzer::start(move |path, gain| {
+                let _ = tx.send(Msg::Gain { path, gain });
+                ctx.request_repaint();
+            })
+        };
         let mut app = Self {
             cfg: Config::load(),
             input: String::new(),
@@ -245,6 +283,8 @@ impl App {
                 let ctx = cc.egui_ctx.clone();
                 player::Engine::start(move || ctx.request_repaint())
             },
+            gains: player::GainCache::load(Some(tools::data_dir().join("loudness.json"))),
+            analyzer,
             scroll_to_queue: false,
             stop: Default::default(),
             title: String::new(),
@@ -617,6 +657,70 @@ impl App {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Gain { path, gain } => {
+                // non misurabile: nessuna correzione, e non si riprova a ogni ascolto
+                let g = gain.unwrap_or(1.0);
+                self.gains.insert(&path, g);
+                if self.now_track().is_some_and(|t| t.path == path) {
+                    self.apply_gain();
+                }
+            }
+            Msg::Tracks { seq, idx, tracks } => {
+                if seq == self.search.seq {
+                    if let Some(p) = self.search.picks.get_mut(&idx) {
+                        p.loading = false;
+                        match tracks {
+                            Some(t) => {
+                                p.tracks =
+                                    t.into_iter().map(|(n, title)| (n, title, true)).collect()
+                            }
+                            None => p.error = true,
+                        }
+                    }
+                }
+            }
+            Msg::Trashed(Ok(dir)) => {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.listen.notice = Some((
+                    tr!(
+                        format!("«{name}» è nel Cestino."),
+                        format!("“{name}” is in the Trash.")
+                    ),
+                    false,
+                ));
+                self.listen.open = None;
+                self.start_scan(ctx);
+            }
+            Msg::Trashed(Err(e)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("Non sono riuscito a spostarlo nel Cestino: {e}"),
+                        format!("Could not move it to the Trash: {e}")
+                    ),
+                    true,
+                ))
+            }
+            Msg::MusicAdded(Ok(name)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("«{name}» aggiunto a {}.", music_app()),
+                        format!("“{name}” added to {}.", music_app())
+                    ),
+                    false,
+                ))
+            }
+            Msg::MusicAdded(Err(e)) => {
+                self.listen.notice = Some((
+                    tr!(
+                        format!("{} non ha aggiunto l'album: {e}", music_app()),
+                        format!("{} did not add the album: {e}", music_app())
+                    ),
+                    true,
+                ))
+            }
             Msg::PlayerDir(p) => {
                 self.cfg.player_dir = Some(p);
                 self.cfg.save();
@@ -669,6 +773,7 @@ impl App {
                         self.search.thumbs = vec![None; r.len()];
                         self.start_thumbnails(ctx, seq, &r);
                         self.search.results = r;
+                        self.search.picks.clear();
                         if (self.listen.library.is_none() || self.listen.stale) && !self.listen.busy
                         {
                             self.start_scan(ctx);
@@ -732,8 +837,11 @@ impl App {
                     self.notify_finished(ctx);
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
-                    // con dei risultati sullo schermo, «Già nella libreria» va aggiornato subito
-                    if !self.search.results.is_empty() && !self.listen.busy {
+                    // la libreria già letta (o «Già nella libreria» nei risultati) si aggiorna
+                    // subito, senza premere «Aggiorna»
+                    if (self.listen.library.is_some() || !self.search.results.is_empty())
+                        && !self.listen.busy
+                    {
                         self.start_scan(ctx);
                     }
                 }
@@ -961,6 +1069,7 @@ impl App {
         let mut download: Vec<String> = Vec::new();
         let mut add: Vec<String> = Vec::new();
         let mut listen_album: Option<usize> = None;
+        let mut toggle_pick: Vec<usize> = Vec::new();
         // risultati che ci sono già nella libreria di «Ascolta» (indice dell'album)
         let owned: Vec<Option<usize>> = match &self.listen.library {
             Some(lib) => self
@@ -1101,20 +1210,26 @@ impl App {
                         "Discography of {name} · “Download” saves the whole album {what}, with the options below."
                     )
                 ),
-                _ => tr!(
-                    format!(
-                        "{} risultati su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
-                        res.len(),
-                        self.search.last_source.label(),
-                        self.search.last_query
-                    ),
-                    format!(
-                        "{} results on {} for “{}” · “Download” saves them {what}, with the options below.",
-                        res.len(),
-                        self.search.last_source.label(),
-                        self.search.last_query
+                _ => {
+                    let n = res.len();
+                    let (count, count_en) = if n == 1 {
+                        ("1 risultato".to_string(), "1 result".to_string())
+                    } else {
+                        (format!("{n} risultati"), format!("{n} results"))
+                    };
+                    tr!(
+                        format!(
+                            "{count} su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
+                            self.search.last_source.label(),
+                            self.search.last_query
+                        ),
+                        format!(
+                            "{count_en} on {} for “{}” · “Download” saves them {what}, with the options below.",
+                            self.search.last_source.label(),
+                            self.search.last_query
+                        )
                     )
-                ),
+                }
             };
             ui.label(
                 RichText::new(header)
@@ -1357,11 +1472,34 @@ impl App {
                                     if plus.clicked() {
                                         add.push(r.url.clone());
                                     }
+                                    if r.collection {
+                                        let open = self.search.picks.get(&i).is_some_and(|p| p.open);
+                                        let label = if open {
+                                            tr!("Chiudi i brani", "Hide tracks")
+                                        } else {
+                                            tr!("Scegli i brani…", "Choose tracks…")
+                                        };
+                                        if ui
+                                            .small_button(label)
+                                            .on_hover_text(tr!(
+                                                "Scegli quali brani dell'album scaricare",
+                                                "Choose which tracks of the album to download"
+                                            ))
+                                            .clicked()
+                                        {
+                                            toggle_pick.push(i);
+                                        }
+                                    }
                                     ui.hyperlink_to(
                                         RichText::new(tr!("apri", "open")).small(),
                                         &r.url,
                                     );
                                 });
+                                if let Some(pick) = self.search.picks.get_mut(&i).filter(|p| p.open) {
+                                    if let Some(sel) = pick_list(ui, pick, can_download) {
+                                        download.push(downloader::pick_input(&r.url, &sel));
+                                    }
+                                }
                             });
                         });
                     }
@@ -1442,6 +1580,9 @@ impl App {
         if !download.is_empty() {
             self.search.notice = None;
             self.start_jobs(ctx, download);
+        }
+        for i in toggle_pick {
+            self.toggle_pick(ctx, i);
         }
         if let Some(a) = listen_album {
             self.tab = Tab::Listen;
@@ -2270,6 +2411,10 @@ struct ListenUi {
     restored: bool,
     /// quando è stata salvata l'ultima posizione nel brano
     last_save: Option<std::time::Instant>,
+    /// album da confermare prima di spostarlo nel Cestino
+    confirm_trash: Option<usize>,
+    /// esito dell'ultima azione sulla libreria (Cestino, Musica): testo, è un errore
+    notice: Option<(String, bool)>,
 }
 
 /// Icone dei pulsanti del player, disegnate (i caratteri ▶ ⏸ non ci sono nei font di serie).
@@ -2442,6 +2587,14 @@ impl App {
         if self.listen.open.is_some_and(|i| i >= library.albums.len()) {
             self.listen.open = None;
         }
+        // i brani non ancora misurati, in sottofondo, uno alla volta
+        if self.cfg.normalize {
+            for t in library.albums.iter().flat_map(|a| &a.tracks) {
+                if !t.video && self.gains.get(&t.path).is_none() {
+                    self.analyzer.later(&t.path);
+                }
+            }
+        }
         self.listen.library = Some(library);
         self.listen.busy = false;
         self.restore_last_track();
@@ -2450,6 +2603,22 @@ impl App {
     fn now_track(&self) -> Option<&player::Track> {
         let (a, t) = self.listen.now?;
         self.listen.library.as_ref()?.albums.get(a)?.tracks.get(t)
+    }
+
+    /// Correzione da usare per un brano (1 se il volume uguale è spento o non ancora misurato).
+    fn gain_for(&self, path: &std::path::Path) -> f32 {
+        if self.cfg.normalize {
+            self.gains.get(path).unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Aggiorna la correzione del brano in ascolto (dopo una misura o l'opzione cambiata).
+    fn apply_gain(&mut self) {
+        if let Some(path) = self.now_track().map(|t| t.path.clone()) {
+            self.engine.set_gain(self.gain_for(&path));
+        }
     }
 
     /// (album, brano) del file nella libreria.
@@ -2475,6 +2644,10 @@ impl App {
         };
         let path = t.path.clone();
         self.engine.set_volume(self.cfg.volume);
+        self.engine.set_gain(self.gain_for(&path));
+        if self.cfg.normalize && self.gains.get(&path).is_none() {
+            self.analyzer.urgent(&path);
+        }
         self.engine.play(&path);
         self.listen.now = Some((album, track));
         self.listen.seek_drag = None;
@@ -2515,6 +2688,12 @@ impl App {
         let Some(path) = self.listen.queue.get(self.listen.qpos).cloned() else {
             return;
         };
+        // il brano dopo si misura subito dopo quello in ascolto: sarà pronto quando parte
+        if let Some(next) = self.listen.queue.get(self.listen.qpos + 1) {
+            if self.cfg.normalize && self.gains.get(next).is_none() {
+                self.analyzer.urgent(next);
+            }
+        }
         match self.locate(&path) {
             Some((a, t)) => self.play_at(a, t),
             // il file non c'è più (cartella riletta): si passa al successivo
@@ -2534,9 +2713,23 @@ impl App {
             .library
             .as_ref()
             .and_then(|l| l.albums.get(album))
-            .map(|a| a.tracks.iter().map(|t| t.path.clone()).collect())
+            .map(|a| {
+                a.tracks
+                    .iter()
+                    .filter(|t| !t.video)
+                    .map(|t| t.path.clone())
+                    .collect()
+            })
             .unwrap_or_default();
-        self.start_queue(list, track);
+        // un video cliccato non è nell'elenco audio: si apre a parte (vedi listen_view)
+        let start = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(album)?.tracks.get(track))
+            .and_then(|t| list.iter().position(|p| *p == t.path))
+            .unwrap_or(0);
+        self.start_queue(list, start);
     }
 
     /// «Ascolta tutto»: le uscite di un artista di fila, nell'ordine dell'elenco.
@@ -2545,7 +2738,7 @@ impl App {
             Some(lib) => albums
                 .iter()
                 .filter_map(|&i| lib.albums.get(i))
-                .flat_map(|a| a.tracks.iter().map(|t| t.path.clone()))
+                .flat_map(|a| a.tracks.iter().filter(|t| !t.video).map(|t| t.path.clone()))
                 .collect(),
             None => return,
         };
@@ -2663,6 +2856,7 @@ impl App {
         self.listen.qpos = t;
         self.listen.now = Some((a, t));
         self.engine.set_volume(self.cfg.volume);
+        self.engine.set_gain(self.gain_for(&path));
         self.engine
             .load_paused(&path, Duration::from_secs_f32(self.cfg.last_pos.max(0.0)));
     }
@@ -2748,6 +2942,10 @@ impl App {
         let mut rescan = false;
         let mut play: Option<(usize, usize)> = None;
         let mut play_group: Option<Vec<usize>> = None;
+        let mut add_music: Option<PathBuf> = None;
+        let mut watch: Option<PathBuf> = None;
+        let mut toggle_norm = false;
+        let mut confirm: Option<usize> = None;
         let mut open: Option<Option<usize>> = None;
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -2773,6 +2971,17 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                 );
             });
+            let mut norm = self.cfg.normalize;
+            if ui
+                .checkbox(&mut norm, tr!("Volume uguale tra i brani", "Same volume for all tracks"))
+                .on_hover_text(tr!(
+                    "Grabbit misura ogni brano (una volta, in sottofondo) e porta tutti allo stesso volume, senza toccare i file.",
+                    "Grabbit measures each track (once, in the background) and brings them all to the same volume, without changing the files."
+                ))
+                .changed()
+            {
+                toggle_norm = true;
+            }
             if self.listen.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -2817,6 +3026,13 @@ impl App {
                             tr!("Cerca nella libreria", "Search the library"),
                         )
                     });
+                    if let Some((text, err)) = &self.listen.notice {
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(if *err { ERR } else { OK }),
+                        );
+                    }
                     ui.add_space(6.0);
                     let needle = self.listen.filter.trim().to_lowercase();
                     let shown: Vec<usize> = (0..lib.albums.len())
@@ -2940,8 +3156,43 @@ impl App {
                             if ui.add(btn).clicked() {
                                 play = Some((ai, 0));
                             }
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .small_button(reveal_label())
+                                    .on_hover_text(a.dir.display().to_string())
+                                    .clicked()
+                                {
+                                    reveal(&a.dir);
+                                }
+                                if cfg!(target_os = "macos")
+                                    && ui
+                                        .small_button(music_app_label())
+                                        .on_hover_text(tr!(
+                                            "Aggiunge l'album alla libreria dell'app Musica (iTunes sui Mac meno recenti)",
+                                            "Adds the album to the Music app library (iTunes on older Macs)"
+                                        ))
+                                        .clicked()
+                                {
+                                    add_music = Some(a.dir.clone());
+                                }
+                                // i brani sciolti stanno nella cartella della musica: mai nel Cestino
+                                if !a.loose
+                                    && ui
+                                        .small_button(tr!("Sposta nel Cestino…", "Move to Trash…"))
+                                        .clicked()
+                                {
+                                    confirm = Some(ai);
+                                }
+                            });
                         });
                     });
+                    if let Some((text, err)) = &self.listen.notice {
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(if *err { ERR } else { OK }),
+                        );
+                    }
                     ui.add_space(6.0);
                     for (ti, t) in a.tracks.iter().enumerate() {
                         let current = self.listen.now == Some((ai, ti));
@@ -2968,6 +3219,13 @@ impl App {
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         ui.set_min_width(w);
+                                        if t.video {
+                                            ui.label(
+                                                RichText::new(tr!("Video", "Video"))
+                                                    .small()
+                                                    .color(ACCENT_LIGHT),
+                                            );
+                                        }
                                         ui.add(
                                             egui::Label::new(
                                                 RichText::new(&t.title).color(color).strong(),
@@ -2986,12 +3244,21 @@ impl App {
                                 egui::Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        let resp = if t.video {
+                            resp.on_hover_text(tr!(
+                                "Si apre nel player video del computer (QuickTime sul Mac)",
+                                "Opens in the computer's video player (QuickTime on the Mac)"
+                            ))
+                        } else {
+                            resp
+                        };
                         resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::Role::Button,
-                                true,
-                                tr!(format!("Ascolta {}", t.title), format!("Play {}", t.title)),
-                            )
+                            let text = if t.video {
+                                tr!(format!("Guarda {}", t.title), format!("Watch {}", t.title))
+                            } else {
+                                tr!(format!("Ascolta {}", t.title), format!("Play {}", t.title))
+                            };
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, text)
                         });
                         if resp.hovered() || current {
                             ui.painter().rect_stroke(
@@ -3002,7 +3269,11 @@ impl App {
                             );
                         }
                         if resp.clicked() {
-                            play = Some((ai, ti));
+                            if t.video {
+                                watch = Some(t.path.clone());
+                            } else {
+                                play = Some((ai, ti));
+                            }
                         }
                     }
                 }
@@ -3013,6 +3284,7 @@ impl App {
         }
         if let Some(o) = open {
             self.listen.open = o;
+            self.listen.notice = None;
         }
         if let Some((a, t)) = play {
             self.play_album_from(a, t);
@@ -3022,6 +3294,158 @@ impl App {
             self.play_albums(&albums);
             ctx.request_repaint();
         }
+        if let Some(dir) = add_music {
+            self.add_to_music(ctx, dir);
+        }
+        if let Some(video) = watch {
+            // il player di Grabbit si mette in pausa: si guarda il video
+            let st = self.engine.status();
+            if st.loaded && !st.paused {
+                self.toggle_play();
+            }
+            open_folder(&video);
+        }
+        if toggle_norm {
+            self.cfg.normalize = !self.cfg.normalize;
+            self.cfg.save();
+            self.apply_gain();
+            // accesa ora: si misurano i brani che mancano
+            if self.cfg.normalize {
+                if let Some(lib) = &self.listen.library {
+                    for t in lib.albums.iter().flat_map(|a| &a.tracks) {
+                        if !t.video && self.gains.get(&t.path).is_none() {
+                            self.analyzer.later(&t.path);
+                        }
+                    }
+                }
+            }
+        }
+        if confirm.is_some() {
+            self.listen.confirm_trash = confirm;
+        }
+        self.trash_dialog(ctx);
+    }
+
+    /// «Scegli i brani…»: apre o chiude l'elenco; la prima volta lo chiede a yt-dlp.
+    fn toggle_pick(&mut self, ctx: &egui::Context, idx: usize) {
+        let Some(url) = self.search.results.get(idx).map(|r| r.url.clone()) else {
+            return;
+        };
+        let pick = self.search.picks.entry(idx).or_default();
+        pick.open = !pick.open;
+        if !pick.open || pick.loading || !pick.tracks.is_empty() {
+            return;
+        }
+        pick.loading = true;
+        pick.error = false;
+        let (cfg, tools, seq) = (self.cfg.clone(), self.toolset(), self.search.seq);
+        let cancel = self.search.cancel.clone();
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let tracks = downloader::list_tracks(&url, &cfg, &tools, &cancel).map(|(_, t)| t);
+            send(Msg::Tracks { seq, idx, tracks });
+        });
+    }
+
+    /// Conferma prima di spostare un album nel Cestino (si può ripristinare dal Cestino).
+    fn trash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(ai) = self.listen.confirm_trash else {
+            return;
+        };
+        let Some((name, dir)) = self
+            .listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(ai))
+            .filter(|a| !a.loose)
+            .map(|a| (a.name.clone(), a.dir.clone()))
+        else {
+            self.listen.confirm_trash = None;
+            return;
+        };
+        let mut go = false;
+        let mut close = false;
+        let resp = egui::Modal::new(egui::Id::unique("trash_album")).show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.label(
+                RichText::new(tr!(
+                    format!("Spostare «{name}» nel Cestino?"),
+                    format!("Move “{name}” to the Trash?")
+                ))
+                .strong(),
+            );
+            ui.label(
+                RichText::new(tr!(
+                    "La cartella dell'album va nel Cestino, con tutti i suoi brani. Se cambi idea, la ripristini dal Cestino.",
+                    "The album folder goes to the Trash with all its tracks. If you change your mind, restore it from the Trash."
+                ))
+                .small(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let btn = egui::Button::new(
+                    RichText::new(tr!("Sposta nel Cestino", "Move to Trash")).color(Color32::WHITE),
+                )
+                .fill(ERR);
+                if ui.add(btn).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    go = true;
+                }
+                if ui.button(tr!("Annulla", "Cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if resp.should_close() || close {
+            self.listen.confirm_trash = None;
+        }
+        if go {
+            self.listen.confirm_trash = None;
+            // se suona un brano di questo album, si ferma prima di spostarlo
+            if self.now_track().is_some_and(|t| t.path.starts_with(&dir)) {
+                self.engine.stop();
+                self.listen.now = None;
+                self.cfg.last_track = None;
+                self.cfg.save();
+            }
+            let send = self.sender(ctx);
+            thread::spawn(move || {
+                let r = trash::delete(&dir).map(|_| dir).map_err(|e| e.to_string());
+                send(Msg::Trashed(r));
+            });
+        }
+    }
+
+    /// «Aggiungi a Musica»: l'app Musica (o iTunes) importa la cartella dell'album.
+    fn add_to_music(&mut self, ctx: &egui::Context, dir: PathBuf) {
+        self.listen.notice = Some((
+            tr!("Aggiungo l'album a Musica…", "Adding the album to Music…").into(),
+            false,
+        ));
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let script = format!(
+                "tell application {} to add (POSIX file {})",
+                applescript_quote(music_app()),
+                applescript_quote(&dir.to_string_lossy())
+            );
+            let r = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(script)
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(name)
+                    } else {
+                        Err(String::from_utf8_lossy(&o.stderr).trim().to_string())
+                    }
+                });
+            send(Msg::MusicAdded(r));
+        });
     }
 
     /// Barra in basso con il brano in ascolto: comandi, posizione e volume.
@@ -3401,6 +3825,23 @@ fn reveal(file: &std::path::Path) {
     }
 }
 
+/// L'app della musica del Mac: «Music» da Catalina (10.15), prima «iTunes».
+fn music_app() -> &'static str {
+    if std::path::Path::new("/System/Applications/Music.app").exists() {
+        "Music"
+    } else {
+        "iTunes"
+    }
+}
+
+fn music_app_label() -> &'static str {
+    if music_app() == "Music" {
+        tr!("Aggiungi a Musica", "Add to Music")
+    } else {
+        tr!("Aggiungi a iTunes", "Add to iTunes")
+    }
+}
+
 /// Testo tra virgolette per AppleScript.
 fn applescript_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -3448,6 +3889,56 @@ fn on_off_text(text: &str, on: bool, ui: &egui::Ui) -> RichText {
     })
 }
 
+/// Elenco dei brani di un album da spuntare; `Some(posizioni)` quando si preme
+/// «Scarica i brani scelti».
+fn pick_list(ui: &mut egui::Ui, pick: &mut Pick, can_download: bool) -> Option<Vec<usize>> {
+    ui.add_space(2.0);
+    if pick.loading {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new(tr!(
+                    "Leggo i brani dell'album…",
+                    "Reading the album's tracks…"
+                ))
+                .small(),
+            );
+        });
+        return None;
+    }
+    if pick.error {
+        ui.label(
+            RichText::new(tr!(
+                "Non riesco a leggere i brani: chiudi e riprova.",
+                "Could not read the tracks: close and try again."
+            ))
+            .small()
+            .color(ERR),
+        );
+        return None;
+    }
+    ui.horizontal(|ui| {
+        if ui.small_button(tr!("Tutti", "All")).clicked() {
+            pick.tracks.iter_mut().for_each(|t| t.2 = true);
+        }
+        if ui.small_button(tr!("Nessuno", "None")).clicked() {
+            pick.tracks.iter_mut().for_each(|t| t.2 = false);
+        }
+    });
+    for (n, title, on) in pick.tracks.iter_mut() {
+        ui.checkbox(on, RichText::new(format!("{n}. {title}")).small());
+    }
+    let chosen: Vec<usize> = pick.tracks.iter().filter(|t| t.2).map(|t| t.0).collect();
+    let label = tr!(
+        format!("Scarica i brani scelti ({})", chosen.len()),
+        format!("Download the chosen tracks ({})", chosen.len())
+    );
+    let go = ui
+        .add_enabled(can_download && !chosen.is_empty(), egui::Button::new(label))
+        .clicked();
+    go.then_some(chosen)
+}
+
 /// Mescola un elenco (Fisher-Yates), con un generatore semplice seminato dall'orologio:
 /// per l'ordine casuale dei brani basta.
 fn shuffle<T>(v: &mut [T]) {
@@ -3465,6 +3956,7 @@ fn shuffle<T>(v: &mut [T]) {
     }
 }
 
+/// Apre una cartella, o un file con il programma di serie (un video nel player video).
 fn open_folder(p: &std::path::Path) {
     let cmd = if cfg!(windows) {
         "explorer"
