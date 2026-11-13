@@ -125,7 +125,7 @@ Accettazione:
 - [unit] Un risultato si ritrova nella libreria per titolo e artista, senza badare a maiuscole, punteggiatura o un anno davanti alla cartella («2002.Tracce»).
 - [snap] Il brano che c'è mostra «Già nella libreria · Ascolta», quello che manca no.
 - [manual] Sul Mac, nella discografia di un artista gli album già scaricati sono segnati.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-011 Ascoltare in modo più comodo
 Come utente, nel player ho «Casuale» e «Ripeti» (tutto o il brano), la barra spaziatrice e
@@ -135,4 +135,4 @@ Accettazione:
 - [snap] Barra del player con «Casuale» e «Ripeti brano» attivi, leggibili; «Ascolta tutto (N brani)» sugli artisti con più uscite.
 - [snap] Dopo un riavvio la barra mostra l'ultimo brano in pausa alla posizione salvata, con le stesse scelte di Casuale e Ripeti.
 - [manual] Sul Mac: spazio mette in pausa, le frecce cambiano brano, «Ripeti tutto» ricomincia l'album.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
