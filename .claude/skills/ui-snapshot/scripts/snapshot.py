@@ -37,6 +37,9 @@ case " $* " in
     # risultati di ricerca preparati (--search FILE): una riga JSON per risultato
     case "$*" in *ytsearch*|*music.youtube.com/search*)
       [ -n "$GRABBIT_FAKE_SEARCH" ] && cat "$GRABBIT_FAKE_SEARCH";;
+    *list=*|*/browse/*)
+      # brani di un album (--tracks FILE)
+      [ -n "$GRABBIT_FAKE_TRACKS" ] && cat "$GRABBIT_FAKE_TRACKS";;
     esac
     exit 0;;
 esac
@@ -61,6 +64,8 @@ def main() -> int:
     ap.add_argument("--display", default=":77")
     ap.add_argument("--home", help="cartella della configurazione da tenere tra due avvii "
                     "(per provare la ripresa); di serie una temporanea, cancellata alla fine")
+    ap.add_argument("--tracks", help="file con i brani che il finto yt-dlp dà per un album "
+                    "(righe JSON con title, url, playlist_title, playlist_index)")
     ap.add_argument("--search", help="file con i risultati che il finto yt-dlp dà alla ricerca "
                     "(una riga JSON per risultato, come --print di yt-dlp)")
     ap.add_argument("steps", nargs="*")
@@ -115,6 +120,8 @@ def main() -> int:
     )
     if a.search:
         env["GRABBIT_FAKE_SEARCH"] = os.path.abspath(a.search)
+    if a.tracks:
+        env["GRABBIT_FAKE_TRACKS"] = os.path.abspath(a.tracks)
 
     def x(*cmd):
         subprocess.run(cmd, env=env, check=True)

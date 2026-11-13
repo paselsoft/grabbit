@@ -96,6 +96,12 @@ enum Msg {
     Trashed(Result<PathBuf, String>),
     /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
     MusicAdded(Result<String, String>),
+    /// brani dell'album `idx` della ricerca `seq`, per sceglierli
+    Tracks {
+        seq: u64,
+        idx: usize,
+        tracks: Option<Vec<(usize, String)>>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -145,6 +151,16 @@ impl ReleaseFilter {
     }
 }
 
+/// Brani di un album nei risultati, da scegliere prima di scaricarlo.
+#[derive(Default)]
+struct Pick {
+    open: bool,
+    loading: bool,
+    /// posizione nell'album, titolo, spuntato
+    tracks: Vec<(usize, String, bool)>,
+    error: bool,
+}
+
 #[derive(Default)]
 struct SearchUi {
     query: String,
@@ -166,6 +182,8 @@ struct SearchUi {
     notice: Option<String>,
     /// discografia di un artista: quali uscite mostrare (come i filtri di YouTube Music)
     release_filter: ReleaseFilter,
+    /// «Scegli i brani…» degli album (indice del risultato)
+    picks: std::collections::HashMap<usize, Pick>,
 }
 
 #[derive(Default)]
@@ -621,6 +639,20 @@ impl App {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
             Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Tracks { seq, idx, tracks } => {
+                if seq == self.search.seq {
+                    if let Some(p) = self.search.picks.get_mut(&idx) {
+                        p.loading = false;
+                        match tracks {
+                            Some(t) => {
+                                p.tracks =
+                                    t.into_iter().map(|(n, title)| (n, title, true)).collect()
+                            }
+                            None => p.error = true,
+                        }
+                    }
+                }
+            }
             Msg::Trashed(Ok(dir)) => {
                 let name = dir
                     .file_name()
@@ -715,6 +747,7 @@ impl App {
                         self.search.thumbs = vec![None; r.len()];
                         self.start_thumbnails(ctx, seq, &r);
                         self.search.results = r;
+                        self.search.picks.clear();
                         if (self.listen.library.is_none() || self.listen.stale) && !self.listen.busy
                         {
                             self.start_scan(ctx);
@@ -1010,6 +1043,7 @@ impl App {
         let mut download: Vec<String> = Vec::new();
         let mut add: Vec<String> = Vec::new();
         let mut listen_album: Option<usize> = None;
+        let mut toggle_pick: Vec<usize> = Vec::new();
         // risultati che ci sono già nella libreria di «Ascolta» (indice dell'album)
         let owned: Vec<Option<usize>> = match &self.listen.library {
             Some(lib) => self
@@ -1150,20 +1184,26 @@ impl App {
                         "Discography of {name} · “Download” saves the whole album {what}, with the options below."
                     )
                 ),
-                _ => tr!(
-                    format!(
-                        "{} risultati su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
-                        res.len(),
-                        self.search.last_source.label(),
-                        self.search.last_query
-                    ),
-                    format!(
-                        "{} results on {} for “{}” · “Download” saves them {what}, with the options below.",
-                        res.len(),
-                        self.search.last_source.label(),
-                        self.search.last_query
+                _ => {
+                    let n = res.len();
+                    let (count, count_en) = if n == 1 {
+                        ("1 risultato".to_string(), "1 result".to_string())
+                    } else {
+                        (format!("{n} risultati"), format!("{n} results"))
+                    };
+                    tr!(
+                        format!(
+                            "{count} su {} per «{}» · «Scarica» li salva {what}, con le opzioni qui sotto.",
+                            self.search.last_source.label(),
+                            self.search.last_query
+                        ),
+                        format!(
+                            "{count_en} on {} for “{}” · “Download” saves them {what}, with the options below.",
+                            self.search.last_source.label(),
+                            self.search.last_query
+                        )
                     )
-                ),
+                }
             };
             ui.label(
                 RichText::new(header)
@@ -1406,11 +1446,34 @@ impl App {
                                     if plus.clicked() {
                                         add.push(r.url.clone());
                                     }
+                                    if r.collection {
+                                        let open = self.search.picks.get(&i).is_some_and(|p| p.open);
+                                        let label = if open {
+                                            tr!("Chiudi i brani", "Hide tracks")
+                                        } else {
+                                            tr!("Scegli i brani…", "Choose tracks…")
+                                        };
+                                        if ui
+                                            .small_button(label)
+                                            .on_hover_text(tr!(
+                                                "Scegli quali brani dell'album scaricare",
+                                                "Choose which tracks of the album to download"
+                                            ))
+                                            .clicked()
+                                        {
+                                            toggle_pick.push(i);
+                                        }
+                                    }
                                     ui.hyperlink_to(
                                         RichText::new(tr!("apri", "open")).small(),
                                         &r.url,
                                     );
                                 });
+                                if let Some(pick) = self.search.picks.get_mut(&i).filter(|p| p.open) {
+                                    if let Some(sel) = pick_list(ui, pick, can_download) {
+                                        download.push(downloader::pick_input(&r.url, &sel));
+                                    }
+                                }
                             });
                         });
                     }
@@ -1491,6 +1554,9 @@ impl App {
         if !download.is_empty() {
             self.search.notice = None;
             self.start_jobs(ctx, download);
+        }
+        for i in toggle_pick {
+            self.toggle_pick(ctx, i);
         }
         if let Some(a) = listen_album {
             self.tab = Tab::Listen;
@@ -3129,6 +3195,27 @@ impl App {
         self.trash_dialog(ctx);
     }
 
+    /// «Scegli i brani…»: apre o chiude l'elenco; la prima volta lo chiede a yt-dlp.
+    fn toggle_pick(&mut self, ctx: &egui::Context, idx: usize) {
+        let Some(url) = self.search.results.get(idx).map(|r| r.url.clone()) else {
+            return;
+        };
+        let pick = self.search.picks.entry(idx).or_default();
+        pick.open = !pick.open;
+        if !pick.open || pick.loading || !pick.tracks.is_empty() {
+            return;
+        }
+        pick.loading = true;
+        pick.error = false;
+        let (cfg, tools, seq) = (self.cfg.clone(), self.toolset(), self.search.seq);
+        let cancel = self.search.cancel.clone();
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let tracks = downloader::list_tracks(&url, &cfg, &tools, &cancel).map(|(_, t)| t);
+            send(Msg::Tracks { seq, idx, tracks });
+        });
+    }
+
     /// Conferma prima di spostare un album nel Cestino (si può ripristinare dal Cestino).
     fn trash_dialog(&mut self, ctx: &egui::Context) {
         let Some(ai) = self.listen.confirm_trash else {
@@ -3669,6 +3756,56 @@ fn on_off_text(text: &str, on: bool, ui: &egui::Ui) -> RichText {
     } else {
         ui.visuals().text_color()
     })
+}
+
+/// Elenco dei brani di un album da spuntare; `Some(posizioni)` quando si preme
+/// «Scarica i brani scelti».
+fn pick_list(ui: &mut egui::Ui, pick: &mut Pick, can_download: bool) -> Option<Vec<usize>> {
+    ui.add_space(2.0);
+    if pick.loading {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new(tr!(
+                    "Leggo i brani dell'album…",
+                    "Reading the album's tracks…"
+                ))
+                .small(),
+            );
+        });
+        return None;
+    }
+    if pick.error {
+        ui.label(
+            RichText::new(tr!(
+                "Non riesco a leggere i brani: chiudi e riprova.",
+                "Could not read the tracks: close and try again."
+            ))
+            .small()
+            .color(ERR),
+        );
+        return None;
+    }
+    ui.horizontal(|ui| {
+        if ui.small_button(tr!("Tutti", "All")).clicked() {
+            pick.tracks.iter_mut().for_each(|t| t.2 = true);
+        }
+        if ui.small_button(tr!("Nessuno", "None")).clicked() {
+            pick.tracks.iter_mut().for_each(|t| t.2 = false);
+        }
+    });
+    for (n, title, on) in pick.tracks.iter_mut() {
+        ui.checkbox(on, RichText::new(format!("{n}. {title}")).small());
+    }
+    let chosen: Vec<usize> = pick.tracks.iter().filter(|t| t.2).map(|t| t.0).collect();
+    let label = tr!(
+        format!("Scarica i brani scelti ({})", chosen.len()),
+        format!("Download the chosen tracks ({})", chosen.len())
+    );
+    let go = ui
+        .add_enabled(can_download && !chosen.is_empty(), egui::Button::new(label))
+        .clicked();
+    go.then_some(chosen)
 }
 
 /// Mescola un elenco (Fisher-Yates), con un generatore semplice seminato dall'orologio:
