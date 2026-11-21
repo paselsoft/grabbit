@@ -148,6 +148,87 @@ fn split_name(line: &str) -> (String, Option<String>) {
     }
 }
 
+/// Cartella dei podcast nella cartella della musica: in «Ascolta» diventa un gruppo.
+const PODCAST_DIR: &str = "Podcast";
+
+/// Link di radio e podcast (RaiPlay Sound): si scaricano come audio, in «Podcast/…».
+fn is_podcast(url: &str) -> bool {
+    site_name(url).as_deref() == Some("RaiPlay Sound")
+}
+
+/// Messaggio chiaro, con il rimedio, per gli errori più comuni di yt-dlp; il testo
+/// originale resta nel registro. `None`: si mostra l'errore così com'è.
+pub fn friendly_error(err: &str, url: &str) -> Option<String> {
+    let e = err.to_lowercase();
+    let site = site_name(url).unwrap_or_else(|| tr!("il sito", "the site").to_string());
+    let login_site = crate::logins::site_for(url).is_some();
+    if e.contains("drm") {
+        return Some(
+            tr!(
+                "Questo contenuto è protetto (DRM) e non si può scaricare.",
+                "This content is protected (DRM) and cannot be downloaded."
+            )
+            .into(),
+        );
+    }
+    if e.contains("not a bot") || e.contains("confirm you") {
+        return Some(tr!(
+            "YouTube chiede di dimostrare che non sei un robot: in «Opzioni avanzate» scegli il browser in «Usa i cookie del browser».",
+            "YouTube asks you to prove you are not a robot: in “Advanced options” choose the browser in “Use browser cookies”."
+        )
+        .into());
+    }
+    if e.contains("available in your country")
+        || e.contains("geo restrict")
+        || e.contains("geo-restrict")
+    {
+        return Some(tr!(
+            format!("Questo contenuto di {site} non è disponibile nel tuo paese."),
+            format!("This {site} content is not available in your country.")
+        ));
+    }
+    if e.contains("login")
+        || e.contains("log in")
+        || e.contains("sign in")
+        || e.contains("registered users")
+        || e.contains("cookies")
+        || e.contains("private")
+        || e.contains("authentication")
+    {
+        return Some(if login_site {
+            tr!(
+                format!("Serve l'accesso a {site}: in «Opzioni avanzate › Accesso ai siti» premi «Aggiorna l'accesso»."),
+                format!("{site} needs you to sign in: in “Advanced options › Site sign-in” press “Update sign-in”.")
+            )
+        } else {
+            tr!(
+                format!("Serve l'accesso a {site}: in «Opzioni avanzate» scegli il browser in «Usa i cookie del browser»."),
+                format!("{site} needs you to sign in: in “Advanced options” choose the browser in “Use browser cookies”.")
+            )
+        });
+    }
+    if e.contains("unsupported url") {
+        return Some(
+            tr!(
+                "Questo link non è di un sito che Grabbit sa scaricare.",
+                "This link is not from a site Grabbit can download."
+            )
+            .into(),
+        );
+    }
+    if e.contains("404")
+        || e.contains("removed")
+        || e.contains("does not exist")
+        || e.contains("unavailable")
+    {
+        return Some(tr!(
+            format!("Il contenuto non c'è più su {site} (rimosso o link sbagliato)."),
+            format!("The content is no longer on {site} (removed or wrong link).")
+        ));
+    }
+    None
+}
+
 /// Nome del sito di un link, per le cartelle dei video e l'elenco dei download.
 pub fn site_name(url: &str) -> Option<String> {
     let rest = url.trim().split("://").nth(1)?;
@@ -494,6 +575,8 @@ pub fn run(
         } else {
             let (line, custom_name) = split_name(&line);
             let (target, pick) = split_pick(&line);
+            // RaiPlay Sound è radio e podcast: sempre audio, come i link Spotify
+            let audio_only = is_podcast(&target);
             jobs.push(Job {
                 id: next,
                 label: target.clone(),
@@ -502,7 +585,7 @@ pub fn run(
                 custom_name,
                 out_name: None,
                 subdir: None,
-                audio_only: false,
+                audio_only,
                 track: None,
                 artist_from_tags: false,
             });
@@ -579,6 +662,8 @@ pub fn run(
         let artist = artist.filter(|a| !a.is_empty() && !album.is_empty());
         let folder = match &artist {
             Some(a) => format!("{a}/{album}"),
+            // un programma di RaiPlay Sound: «Podcast/<programma>»
+            None if is_podcast(&job.target) => format!("{PODCAST_DIR}/{album}"),
             None => album.clone(),
         };
         let shown = if music_album && artist.is_none() {
@@ -892,9 +977,12 @@ fn list_playlist(job: &Job, cfg: &Config, tools: &Toolset, cancel: &AtomicBool) 
     if let Some(js) = &tools.js {
         add(&mut a, &["--js-runtimes", &js.arg()]);
     }
-    if !cfg.cookies_browser.is_empty() {
-        add(&mut a, &["--cookies-from-browser", &cfg.cookies_browser]);
-    }
+    // i cookie salvati del sito del link (Accesso ai siti), altrimenti quelli del browser
+    a.extend(crate::logins::cookie_args(
+        &crate::logins::cookie_dir(),
+        &job.target,
+        &cfg.cookies_browser,
+    ));
     a.push("--".into());
     a.push(job.target.clone());
 
@@ -1016,7 +1104,9 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         // nome scelto dall'utente: stesse cartelle, il nome del file è il suo
         None if custom.is_some() => {
             let name = custom.unwrap_or_default();
-            if audio && cfg.music_folders {
+            if audio && is_podcast(&job.target) {
+                format!("{PODCAST_DIR}/%(series,uploader|RaiPlay Sound)s/{name}.%(ext)s")
+            } else if audio && cfg.music_folders {
                 format!(
                     "{artist_tmpl}/%(album|{})s/{name}.%(ext)s",
                     tr!("Singoli", "Singles")
@@ -1033,6 +1123,10 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
             None => format!("{artist_tmpl}/{n}.%(ext)s"),
         },
         Some(n) => format!("{n}.%(ext)s"),
+        // un episodio di radio o podcast: «Podcast/<programma>/Titolo»
+        None if audio && is_podcast(&job.target) => {
+            format!("{PODCAST_DIR}/%(series,uploader|RaiPlay Sound)s/%(title).150B.%(ext)s")
+        }
         // musica senza album noto: cartelle dai metadati di yt-dlp (YouTube Music li ha
         // per ogni brano). Qui le «/» del modello creano le cartelle.
         None if audio && cfg.music_folders && !(cfg.playlist && job.target.contains("list=")) => {
@@ -1155,9 +1249,12 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     if let Some(js) = &tools.js {
         add(&mut a, &["--js-runtimes", &js.arg()]);
     }
-    if !cfg.cookies_browser.is_empty() {
-        add(&mut a, &["--cookies-from-browser", &cfg.cookies_browser]);
-    }
+    // i cookie salvati del sito del link (Accesso ai siti), altrimenti quelli del browser
+    a.extend(crate::logins::cookie_args(
+        &crate::logins::cookie_dir(),
+        &job.target,
+        &cfg.cookies_browser,
+    ));
     a.push("--".into());
     a.push(job.target.clone());
     a
@@ -1404,34 +1501,36 @@ fn run_job(
         }
         _ => (
             false,
-            last_error.unwrap_or_else(|| {
-                tr!(
-                    "download non riuscito (vedi il registro)",
-                    "download failed (see the log)"
-                )
-                .into()
-            }),
+            last_error
+                .map(|e| friendly_error(&e, &job.target).unwrap_or(e))
+                .unwrap_or_else(|| {
+                    tr!(
+                        "download non riuscito (vedi il registro)",
+                        "download failed (see the log)"
+                    )
+                    .into()
+                }),
             None,
             None,
         ),
     }
 }
 
+/// I test che scrivono e avviano un finto yt-dlp (qui e in `logins`) girano uno alla volta:
+/// se un test avvia un processo mentre un altro sta ancora scrivendo il suo script, il
+/// processo figlio eredita per un istante il file aperto e Linux rifiuta di eseguirlo
+/// («Text file busy»): l'avvio fallisce a caso.
+#[cfg(all(test, unix))]
+static FAKE_YTDLP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, unix))]
+pub(crate) fn fake_ytdlp_lock() -> std::sync::MutexGuard<'static, ()> {
+    FAKE_YTDLP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// I test che scrivono e avviano un finto yt-dlp girano uno alla volta: se un test
-    /// avvia un processo mentre un altro sta ancora scrivendo il suo script, il processo
-    /// figlio eredita per un istante il file aperto e Linux rifiuta di eseguirlo
-    /// («Text file busy»): l'avvio fallisce a caso.
-    #[cfg(unix)]
-    static FAKE_YTDLP: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[cfg(unix)]
-    fn fake_ytdlp_lock() -> std::sync::MutexGuard<'static, ()> {
-        FAKE_YTDLP.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     fn job(target: &str, out_name: Option<&str>, audio_only: bool) -> Job {
         Job {
@@ -2390,6 +2489,58 @@ echo \"GRBFILE|/x/$last.mp4\"\nexit 1\n",
             "{res:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn podcasts_and_clear_errors() {
+        let cfg = Config {
+            mode: Mode::Video,
+            out_dir: "/Musica".into(),
+            video_dir: "/Filmati".into(),
+            ..Config::default()
+        };
+        // RaiPlay Sound: audio, nella cartella della musica, in «Podcast/<programma>»
+        let url = "https://www.raiplaysound.it/audio/2026/11/puntata-1.html";
+        assert!(is_podcast(url));
+        let mut j = job(url, None, true);
+        j.audio_only = is_podcast(url);
+        let a = build_args(&j, &cfg, &toolset());
+        assert!(a.contains(&"-x".to_string()));
+        let p = a.iter().position(|x| x == "-P").unwrap();
+        assert_eq!(a[p + 1], "/Musica");
+        let o = a.iter().position(|x| x == "-o").unwrap();
+        assert_eq!(
+            a[o + 1],
+            "Podcast/%(series,uploader|RaiPlay Sound)s/%(title).150B.%(ext)s"
+        );
+        assert!(!is_podcast("https://www.raiplay.it/video/x.html"));
+        // messaggi chiari
+        let fb = "https://www.facebook.com/reel/1";
+        let rai = "https://www.raiplay.it/video/x.html";
+        let m = |e: &str, u: &str| friendly_error(e, u).unwrap_or_default();
+        assert!(m("This video is DRM protected", rai).contains("DRM"));
+        assert!(
+            m(
+                "[facebook] 1: Cannot parse data; please report this issue. You may need to log in",
+                fb
+            )
+            .contains("Accesso ai siti")
+                || m("You may need to log in", fb).contains("sign-in")
+        );
+        assert!(
+            m(
+                "The uploader has not made this video available in your country",
+                rai
+            )
+            .contains("paese")
+                || m(
+                    "The uploader has not made this video available in your country",
+                    rai
+                )
+                .contains("country")
+        );
+        assert!(m("Sign in to confirm you're not a bot", "https://youtu.be/x").contains("robot"));
+        assert_eq!(friendly_error("Something odd", fb), None);
     }
 
     #[test]

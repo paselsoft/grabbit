@@ -207,3 +207,32 @@ Accettazione:
 - [unit] Video in `<cartella video>/<sito>/<programma o canale>/Titolo`; audio nella cartella della musica; opzione spenta come prima.
 - [snap] «Salva in» mostra la cartella del modo scelto; «Video in cartelle per sito» nelle opzioni avanzate.
 Stato: fatta
+
+## Milestone 7: accesso ai siti e messaggi chiari (0.9.0)
+
+Dal piano `docs/PIANO-REELDOWNLOADER.md`. S-019, S-020, S-021
+
+### S-019 Accesso ai siti
+Come utente, in «Opzioni avanzate › Accesso ai siti» scelgo il browser e premo «Aggiorna l'accesso»
+per Facebook, Instagram o RaiPlay: Grabbit copia i cookie di quel solo sito e li usa solo per i suoi link.
+Accettazione:
+- [unit] Si tengono solo i cookie dei domini del sito (anche le righe «#HttpOnly_»); file privato (600); nessun file temporaneo rimasto.
+- [unit] Un link del sito riceve `--cookies <file del sito>`, gli altri il browser di «Usa i cookie del browser» o niente.
+- [snap] Sezione con il browser, una riga per sito («non impostato», «aggiornato oggi»), «Aggiorna l'accesso», «Togli», esito in verde o rosso.
+- [manual] Sul Mac, un reel di Facebook che senza accesso non si scarica.
+Stato: fatta (manca la prova [manual] sul Mac)
+
+### S-020 Sito nell'elenco e messaggi chiari
+Come utente, ogni riga dei download dice il sito, e gli errori comuni hanno un messaggio con il rimedio.
+Accettazione:
+- [unit] DRM, accesso richiesto (con il rimedio giusto per il sito), blocco per paese, robot di YouTube, link non supportato, contenuto rimosso.
+- [snap] «RaiPlay», «RaiPlay Sound» davanti al titolo nella riga.
+Stato: fatta (manca la prova [manual] sul Mac)
+
+### S-021 RaiPlay Sound in audio, nella cartella Podcast
+Come utente, i link RaiPlay Sound si scaricano sempre come audio in `Musica/Grabbit/Podcast/<programma>/`,
+e in «Ascolta» stanno nel gruppo «Podcast».
+Accettazione:
+- [unit] Un link RaiPlay Sound è audio, nella cartella della musica, in «Podcast/<programma>/Titolo».
+- [manual] Sul Mac, una puntata di un programma RaiPlay Sound.
+Stato: fatta (manca la prova [manual] sul Mac)
