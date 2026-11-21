@@ -115,6 +115,8 @@ pub struct Job {
     artist_from_tags: bool,
     /// album di cui scaricare solo alcuni brani (posizioni nella playlist, da 1)
     pick: Option<Vec<usize>>,
+    /// nome del file scelto dall'utente (senza estensione)
+    custom_name: Option<String>,
 }
 
 /// Separa il link di un album dai brani scelti in una riga di `run` (vedi `pick_input`).
@@ -125,6 +127,150 @@ const PICK_SEP: char = '\u{1f}';
 pub fn pick_input(url: &str, tracks: &[usize]) -> String {
     let list: Vec<String> = tracks.iter().map(|n| n.to_string()).collect();
     format!("{url}{PICK_SEP}{}", list.join(","))
+}
+
+/// Separa il link dal nome del file scelto in una riga di `run` (vedi `named_input`).
+const NAME_SEP: char = '\u{1e}';
+
+/// Riga da passare a `run` per salvare un link con un nome di file scelto.
+pub fn named_input(url: &str, name: &str) -> String {
+    format!("{url}{NAME_SEP}{name}")
+}
+
+/// Link e nome del file scelto (pulito; `None` se vuoto) di una riga di `run`.
+fn split_name(line: &str) -> (String, Option<String>) {
+    match line.split_once(NAME_SEP) {
+        Some((url, name)) => (
+            url.to_string(),
+            Some(sanitize(name)).filter(|n| !n.is_empty()),
+        ),
+        None => (line.to_string(), None),
+    }
+}
+
+/// Nome del sito di un link, per le cartelle dei video e l'elenco dei download.
+pub fn site_name(url: &str) -> Option<String> {
+    let rest = url.trim().split("://").nth(1)?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .split(':')
+        .next()?
+        .to_lowercase();
+    let host = host.trim_start_matches("www.").trim_start_matches("m.");
+    let known = [
+        ("music.youtube.com", "YouTube Music"),
+        ("youtube.com", "YouTube"),
+        ("youtu.be", "YouTube"),
+        ("facebook.com", "Facebook"),
+        ("fb.watch", "Facebook"),
+        ("instagram.com", "Instagram"),
+        ("raiplaysound.it", "RaiPlay Sound"),
+        ("raiplay.it", "RaiPlay"),
+        ("rai.it", "Rai"),
+        ("vimeo.com", "Vimeo"),
+        ("tiktok.com", "TikTok"),
+        ("x.com", "X"),
+        ("twitter.com", "X"),
+        ("dailymotion.com", "Dailymotion"),
+        ("open.spotify.com", "Spotify"),
+    ];
+    if let Some((_, name)) = known
+        .iter()
+        .find(|(h, _)| host == *h || host.ends_with(&format!(".{h}")))
+    {
+        return Some(name.to_string());
+    }
+    // un sito qualsiasi: il nome prima del dominio, con la maiuscola («vimeo.com» → «Vimeo»)
+    let parts: Vec<&str> = host.split('.').filter(|p| !p.is_empty()).collect();
+    let main = if parts.len() >= 2 {
+        parts[parts.len() - 2]
+    } else {
+        *parts.first()?
+    };
+    let mut c = main.chars();
+    let first = c.next()?;
+    Some(sanitize(
+        &(first.to_uppercase().collect::<String>() + c.as_str()),
+    ))
+}
+
+/// Testo di una trascrizione da un file .srt: senza numeri, orari, etichette di stile e
+/// righe ripetute (i sottotitoli automatici ripetono la riga precedente in quella dopo).
+pub fn srt_to_text(srt: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for line in srt.lines() {
+        let l = line.trim().trim_start_matches('\u{feff}');
+        if l.is_empty() || l.chars().all(|c| c.is_ascii_digit()) || l.contains("-->") {
+            continue;
+        }
+        // <i>…</i>, <font …>, {\an8}
+        let mut clean = String::new();
+        let mut skip: Option<char> = None;
+        for c in l.chars() {
+            match (skip, c) {
+                (None, '<') => skip = Some('>'),
+                (None, '{') => skip = Some('}'),
+                (Some(end), c) if c == end => skip = None,
+                (Some(_), _) => {}
+                (None, c) => clean.push(c),
+            }
+        }
+        let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !clean.is_empty() && out.last() != Some(&clean) {
+            out.push(clean);
+        }
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// Accanto al video salvato, una trascrizione .txt per ogni sottotitolo .srt dello stesso
+/// video («Titolo.it.srt» → «Titolo.it.txt»). Ritorna i file creati.
+pub fn make_transcripts(video: &std::path::Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(stem)) = (video.parent(), video.file_stem()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.", stem.to_string_lossy());
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut made = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with(&prefix) && name.to_lowercase().ends_with(".srt")) {
+            continue;
+        }
+        let srt = e.path();
+        let txt = srt.with_extension("txt");
+        if let Ok(bytes) = std::fs::read(&srt) {
+            let text = srt_to_text(&String::from_utf8_lossy(&bytes));
+            if std::fs::write(&txt, text).is_ok() {
+                made.push(txt);
+            }
+        }
+    }
+    made.sort();
+    made
+}
+
+/// La trascrizione di un video già scaricato, se c'è (la prima in ordine di nome).
+pub fn transcript_of(video: &std::path::Path) -> Option<PathBuf> {
+    let dir = video.parent()?;
+    let prefix = format!("{}.", video.file_stem()?.to_string_lossy());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "txt")
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 /// Link e brani scelti di una riga di `run`.
@@ -160,6 +306,7 @@ pub fn list_tracks(
         track: None,
         artist_from_tags: false,
         pick: None,
+        custom_name: None,
     };
     let cfg = Config {
         playlist: true,
@@ -325,6 +472,7 @@ pub fn run(
                             track: None,
                             artist_from_tags: false,
                             pick: None,
+                            custom_name: None,
                         });
                         next += 1;
                     }
@@ -344,12 +492,14 @@ pub fn run(
                 }
             }
         } else {
+            let (line, custom_name) = split_name(&line);
             let (target, pick) = split_pick(&line);
             jobs.push(Job {
                 id: next,
                 label: target.clone(),
                 target,
                 pick,
+                custom_name,
                 out_name: None,
                 subdir: None,
                 audio_only: false,
@@ -463,6 +613,7 @@ pub fn run(
                 track: Some(e.index),
                 artist_from_tags: music_album && artist.is_none(),
                 pick: None,
+                custom_name: None,
             };
             next += 1;
             emit(Event::JobAdded {
@@ -825,8 +976,19 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         "--no-quiet",
     ]);
 
-    // cartella e nome file
-    let mut dir = cfg.out_dir.clone();
+    // cartella e nome file: la musica nella sua cartella, i video in quella dei video
+    let mut dir = if audio {
+        cfg.out_dir.clone()
+    } else {
+        cfg.video_dir.clone()
+    };
+    // video in cartelle per sito: «Facebook/…», «RaiPlay/<programma>/…»
+    let site = (!audio && cfg.site_folders)
+        .then(|| site_name(&job.target))
+        .flatten();
+    if let Some(s) = &site {
+        dir = dir.join(s);
+    }
     if let Some(sub) = job.subdir.as_ref().filter(|_| !job.artist_from_tags) {
         // «Artista/Album»: una cartella dentro l'altra (sanitize toglie le «/» dai nomi)
         for part in sub.split('/').filter(|p| !p.is_empty()) {
@@ -840,7 +1002,24 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         "%(album_artists.0,artists.0,artist,creator,uploader|{})s",
         tr!("Artista sconosciuto", "Unknown Artist")
     );
+    // il programma (RaiPlay) o chi l'ha pubblicato (Facebook, YouTube): una cartella per uno
+    let owner_tmpl = format!("%(series,uploader,channel|{})s", tr!("Varie", "Misc"));
+    let custom = job.custom_name.as_deref();
     a.push(match &job.out_name {
+        // nome scelto dall'utente: stesse cartelle, il nome del file è il suo
+        None if custom.is_some() => {
+            let name = custom.unwrap_or_default();
+            if audio && cfg.music_folders {
+                format!(
+                    "{artist_tmpl}/%(album|{})s/{name}.%(ext)s",
+                    tr!("Singoli", "Singles")
+                )
+            } else if site.is_some() {
+                format!("{owner_tmpl}/{name}.%(ext)s")
+            } else {
+                format!("{name}.%(ext)s")
+            }
+        }
         // brano di un album con l'artista dai metadati: «Artista/Album/01 - Titolo»
         Some(n) if job.artist_from_tags => match &job.subdir {
             Some(album) => format!("{artist_tmpl}/{album}/{n}.%(ext)s"),
@@ -854,6 +1033,10 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
                 "{artist_tmpl}/%(album|{})s/%(track,title).150B.%(ext)s",
                 tr!("Singoli", "Singles"),
             )
+        }
+        // video di un sito, uno solo: «<programma o canale>/Titolo»
+        None if site.is_some() && !(cfg.playlist && job.target.contains("list=")) => {
+            format!("{owner_tmpl}/%(title).150B.%(ext)s")
         }
         // Solo numero d'ordine (se è una playlist) e titolo. La cartella della playlist NON
         // si fa con il modello: yt-dlp trasforma ogni "/" dentro un valore in un carattere
@@ -926,6 +1109,28 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
         };
         add(&mut a, &["-f", "bv*+ba/b", "-S", &format!("{res}{codecs}")]);
         add(&mut a, &["--merge-output-format", &cfg.video_container]);
+        if cfg.subtitles {
+            // anche quelli automatici; nel video e accanto in .srt (poi la trascrizione .txt)
+            let langs: Vec<String> = cfg
+                .sub_langs
+                .split(',')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| format!("{l}.*"))
+                .collect();
+            add(
+                &mut a,
+                &[
+                    "--write-subs",
+                    "--write-auto-subs",
+                    "--sub-langs",
+                    &langs.join(","),
+                    "--convert-subs",
+                    "srt",
+                    "--embed-subs",
+                ],
+            );
+        }
         if cfg.embed_meta {
             add(&mut a, &["--embed-metadata"]);
             if matches!(cfg.video_container.as_str(), "mp4" | "mkv") {
@@ -1150,6 +1355,17 @@ fn run_job(
             // un solo file salvato e nessun errore: va nell'archivio dei già scaricati
             let file = (success && files == 1).then(|| last_file.clone());
             let saved = (!last_file.is_empty()).then(|| last_file.clone());
+            // video con sottotitoli: la trascrizione .txt accanto al video
+            if cfg.subtitles && !(job.audio_only || cfg.mode == Mode::Audio) {
+                if let Some(v) = &saved {
+                    for t in make_transcripts(std::path::Path::new(v)) {
+                        emit(Event::Log(tr!(
+                            format!("Trascrizione: {}", t.display()),
+                            format!("Transcript: {}", t.display())
+                        )));
+                    }
+                }
+            }
             (
                 true,
                 if name.is_empty() {
@@ -1203,6 +1419,7 @@ mod tests {
             track: None,
             artist_from_tags: false,
             pick: None,
+            custom_name: None,
         }
     }
 
@@ -1684,6 +1901,7 @@ esac
             },
             Config {
                 mode: Mode::Video,
+                site_folders: false,
                 ..cfg.clone()
             },
         ] {
@@ -1938,7 +2156,9 @@ esac
     fn playlist_template_has_no_playlist_name_and_folder_goes_in_path() {
         let cfg = Config {
             out_dir: "/D".into(),
+            video_dir: "/D".into(),
             playlist: true,
+            site_folders: false,
             ..Config::default()
         };
         let mut j = job("https://www.youtube.com/playlist?list=PL1", None, false);
@@ -1955,6 +2175,129 @@ esac
             PathBuf::from(&a[p + 1]),
             PathBuf::from("/D").join("La mia playlist")
         );
+    }
+
+    #[test]
+    fn sites_are_recognised_from_the_link() {
+        let s = |u: &str| site_name(u);
+        assert_eq!(
+            s("https://www.facebook.com/reel/123"),
+            Some("Facebook".into())
+        );
+        assert_eq!(
+            s("https://m.facebook.com/watch?v=1"),
+            Some("Facebook".into())
+        );
+        assert_eq!(s("https://fb.watch/abc/"), Some("Facebook".into()));
+        assert_eq!(
+            s("https://www.raiplay.it/video/2024/x.html"),
+            Some("RaiPlay".into())
+        );
+        assert_eq!(
+            s("https://www.raiplaysound.it/audio/x"),
+            Some("RaiPlay Sound".into())
+        );
+        assert_eq!(s("https://youtu.be/x"), Some("YouTube".into()));
+        assert_eq!(
+            s("https://music.youtube.com/watch?v=x"),
+            Some("YouTube Music".into())
+        );
+        assert_eq!(s("https://player.vimeo.com/video/1"), Some("Vimeo".into()));
+        assert_eq!(
+            s("https://www.esempio.it:8080/v.mp4"),
+            Some("Esempio".into())
+        );
+        assert_eq!(s("non un link"), None);
+    }
+
+    #[test]
+    fn videos_go_in_the_video_folder_by_site_with_subtitles() {
+        let cfg = Config {
+            mode: Mode::Video,
+            out_dir: "/Musica".into(),
+            video_dir: "/Filmati".into(),
+            subtitles: true,
+            sub_langs: "it,en".into(),
+            ..Config::default()
+        };
+        let fb = job("https://www.facebook.com/reel/123", None, false);
+        let a = build_args(&fb, &cfg, &toolset());
+        let p = a.iter().position(|x| x == "-P").unwrap();
+        assert_eq!(
+            PathBuf::from(&a[p + 1]),
+            PathBuf::from("/Filmati").join("Facebook")
+        );
+        let o = a.iter().position(|x| x == "-o").unwrap();
+        assert!(
+            a[o + 1].starts_with("%(series,uploader,channel|"),
+            "{}",
+            a[o + 1]
+        );
+        assert!(
+            a[o + 1].ends_with(")s/%(title).150B.%(ext)s"),
+            "{}",
+            a[o + 1]
+        );
+        // sottotitoli italiani e inglesi, anche automatici, nel video e in .srt
+        assert!(has_pair(&a, "--sub-langs", "it.*,en.*"));
+        assert!(has_pair(&a, "--convert-subs", "srt"));
+        for f in ["--write-subs", "--write-auto-subs", "--embed-subs"] {
+            assert!(a.contains(&f.to_string()), "{f}");
+        }
+        // un nome scelto: stesse cartelle, il nome del file è quello
+        let mut named = job("https://www.raiplay.it/video/x.html", None, false);
+        named.custom_name = Some("Puntata 1".into());
+        let a = build_args(&named, &cfg, &toolset());
+        let o = a.iter().position(|x| x == "-o").unwrap();
+        assert!(a[o + 1].ends_with(")s/Puntata 1.%(ext)s"), "{}", a[o + 1]);
+        let p = a.iter().position(|x| x == "-P").unwrap();
+        assert_eq!(
+            PathBuf::from(&a[p + 1]),
+            PathBuf::from("/Filmati").join("RaiPlay")
+        );
+        // l'audio resta nella cartella della musica, senza sottotitoli
+        let audio = Config {
+            mode: Mode::Audio,
+            ..cfg.clone()
+        };
+        let a = build_args(&fb, &audio, &toolset());
+        let p = a.iter().position(|x| x == "-P").unwrap();
+        assert_eq!(a[p + 1], "/Musica");
+        assert!(!a.contains(&"--write-subs".to_string()));
+        // sottotitoli spenti: niente argomenti
+        let off = Config {
+            subtitles: false,
+            ..cfg.clone()
+        };
+        assert!(!build_args(&fb, &off, &toolset()).contains(&"--embed-subs".to_string()));
+        // il nome arriva nella riga di `run`, pulito
+        assert_eq!(
+            split_name(&named_input("https://x", "A/B: c")),
+            ("https://x".to_string(), Some("A B c".to_string()))
+        );
+        assert_eq!(split_name(&named_input("https://x", "  ")).1, None);
+    }
+
+    #[test]
+    fn subtitles_become_a_clean_transcript() {
+        let srt = "\u{feff}1\n00:00:01,000 --> 00:00:03,000\n<i>Buongiorno a tutti</i>\n\n2\n00:00:03,000 --> 00:00:05,000\nBuongiorno a tutti\noggi parliamo di musica\n\n3\n00:00:05,000 --> 00:00:07,000\n{\\an8}oggi parliamo di musica\n\n";
+        assert_eq!(
+            srt_to_text(srt),
+            "Buongiorno a tutti\noggi parliamo di musica\n"
+        );
+        // accanto al video: «Video.it.srt» → «Video.it.txt», solo per quel video
+        let dir = std::env::temp_dir().join(format!("grabbit-subs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("Video.mp4");
+        std::fs::write(&video, b"x").unwrap();
+        std::fs::write(dir.join("Video.it.srt"), srt).unwrap();
+        std::fs::write(dir.join("Altro.en.srt"), srt).unwrap();
+        let made = make_transcripts(&video);
+        assert_eq!(made, vec![dir.join("Video.it.txt")]);
+        assert!(!dir.join("Altro.en.txt").exists());
+        assert_eq!(transcript_of(&video), Some(dir.join("Video.it.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -44,6 +44,13 @@ const AUDIO_FORMATS: [(&str, &str); 6] = [
     ("wav", "WAV (senza perdita)"),
 ];
 const BITRATES: [u32; 7] = [320, 256, 192, 160, 128, 96, 64];
+/// Lingue dei sottotitoli.
+const SUB_LANGS: [(&str, &str); 3] = [
+    ("it,en", "Italiano e inglese"),
+    ("it", "Italiano"),
+    ("en", "Inglese"),
+];
+
 const BROWSERS: [(&str, &str); 7] = [
     ("", "Nessuno"),
     ("chrome", "Chrome"),
@@ -66,7 +73,8 @@ enum Msg {
     UpdateCheck(Result<selfupdate::Check, String>),
     UpdateStatus(String),
     UpdateDone(Result<(), String>),
-    Folder(PathBuf),
+    /// cartella scelta con «Sfoglia…», per il modo (Video o Audio) che era attivo
+    Folder(PathBuf, Mode),
     /// cartella della musica scelta per «Ascolta»
     PlayerDir(PathBuf),
     /// libreria musicale letta (`seq` scarta le letture superate)
@@ -127,6 +135,8 @@ struct JobUi {
     spec: Option<downloader::Job>,
     /// file salvato, per «Mostra nel Finder»
     file: Option<PathBuf>,
+    /// trascrizione .txt del video, per «Apri la trascrizione»
+    transcript: Option<PathBuf>,
 }
 
 enum UpdateUi {
@@ -205,6 +215,8 @@ struct ToolsUi {
 pub struct App {
     cfg: Config,
     input: String,
+    /// «Nome del file (facoltativo)», quando nei link ce n'è uno solo
+    custom_name: String,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     tools: ToolsUi,
@@ -261,6 +273,7 @@ impl App {
         let mut app = Self {
             cfg: Config::load(),
             input: String::new(),
+            custom_name: String::new(),
             tx,
             rx,
             tools: ToolsUi::default(),
@@ -372,12 +385,18 @@ impl App {
     }
 
     fn start_download(&mut self, ctx: &egui::Context) {
-        let inputs: Vec<String> = self
+        let mut inputs: Vec<String> = self
             .input
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        // un solo link con un nome scelto: il file si chiamerà così
+        let name = self.custom_name.trim().to_string();
+        if inputs.len() == 1 && !name.is_empty() {
+            inputs[0] = downloader::named_input(&inputs[0], &name);
+        }
+        self.custom_name.clear();
         self.start_jobs(ctx, inputs);
     }
 
@@ -386,7 +405,9 @@ impl App {
         if inputs.is_empty() || self.running {
             return;
         }
-        if let Err(e) = std::fs::create_dir_all(&self.cfg.out_dir) {
+        if let Err(e) = std::fs::create_dir_all(&self.cfg.out_dir)
+            .and_then(|_| std::fs::create_dir_all(&self.cfg.video_dir))
+        {
             self.log.push(tr!(
                 format!("Impossibile creare la cartella: {e}"),
                 format!("Could not create the folder: {e}")
@@ -561,9 +582,18 @@ impl App {
         added
     }
 
+    /// Cartella dove vanno i download del modo attivo: i video in Filmati, la musica a parte.
+    fn save_dir(&self) -> &PathBuf {
+        match self.cfg.mode {
+            Mode::Video => &self.cfg.video_dir,
+            Mode::Audio => &self.cfg.out_dir,
+        }
+    }
+
     fn pick_folder(&self, ctx: &egui::Context) {
         let send = self.sender(ctx);
-        let start = self.cfg.out_dir.clone();
+        let start = self.save_dir().clone();
+        let mode = self.cfg.mode;
         thread::spawn(move || {
             if let Some(p) = rfd::FileDialog::new()
                 .set_title(tr!(
@@ -573,7 +603,7 @@ impl App {
                 .set_directory(start)
                 .pick_folder()
             {
-                send(Msg::Folder(p));
+                send(Msg::Folder(p, mode));
             }
         });
     }
@@ -656,7 +686,8 @@ impl App {
             Msg::UpdateDone(Err(e)) => {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
-            Msg::Folder(p) => self.cfg.out_dir = p,
+            Msg::Folder(p, Mode::Video) => self.cfg.video_dir = p,
+            Msg::Folder(p, Mode::Audio) => self.cfg.out_dir = p,
             Msg::Gain { path, gain } => {
                 // non misurabile: nessuna correzione, e non si riprova a ogni ascolto
                 let g = gain.unwrap_or(1.0);
@@ -799,6 +830,7 @@ impl App {
                         state: JobState::Waiting,
                         spec: None,
                         file: None,
+                        transcript: None,
                     });
                 }
                 Event::JobRemoved { id } => self.jobs.retain(|j| j.id != id),
@@ -824,6 +856,10 @@ impl App {
                         j.state = if ok { JobState::Done } else { JobState::Failed };
                         j.pct = if ok { 1.0 } else { j.pct };
                         j.detail = detail;
+                        j.transcript = file
+                            .as_deref()
+                            .filter(|_| self.cfg.subtitles)
+                            .and_then(downloader::transcript_of);
                         j.file = file;
                     }
                 }
@@ -1665,6 +1701,21 @@ impl App {
                     ui.close();
                 }
             });
+            // un solo link: si può scegliere il nome del file
+            if self.input.lines().filter(|l| !l.trim().is_empty()).count() == 1 {
+                ui.horizontal(|ui| {
+                    let label = ui.label(tr!("Nome del file", "File name"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.custom_name)
+                            .hint_text(tr!(
+                                "facoltativo: di serie il titolo del video",
+                                "optional: the video's title by default"
+                            ))
+                            .desired_width(f32::INFINITY),
+                    )
+                    .labelled_by(label.id);
+                });
+            }
             if paste {
                 // il testo incollato va al campo che ha il focus: glielo ridiamo
                 ui.memory_mut(|m| m.request_focus(field_id));
@@ -1770,7 +1821,7 @@ impl App {
                         if ui.button(tr!("Sfoglia…", "Browse…")).clicked() {
                             self.pick_folder(ctx);
                         }
-                        ui.label(self.cfg.out_dir.to_string_lossy());
+                        ui.label(self.save_dir().to_string_lossy());
                     });
                     ui.end_row();
                 });
@@ -1791,6 +1842,25 @@ impl App {
                 ),
             );
             if self.cfg.mode == Mode::Video {
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.cfg.subtitles,
+                        tr!("Sottotitoli e trascrizione", "Subtitles and transcript"),
+                    )
+                    .on_hover_text(tr!(
+                        "Sottotitoli (anche quelli automatici) dentro il video e accanto in .srt, più una trascrizione .txt da leggere",
+                        "Subtitles (automatic ones too) inside the video and next to it as .srt, plus a .txt transcript to read"
+                    ));
+                    if self.cfg.subtitles {
+                        egui::ComboBox::from_id_salt("sub_langs")
+                            .selected_text(label_of(&SUB_LANGS, &self.cfg.sub_langs))
+                            .show_ui(ui, |ui| {
+                                for (v, l) in SUB_LANGS {
+                                    ui.selectable_value(&mut self.cfg.sub_langs, v.to_string(), loc(l));
+                                }
+                            });
+                    }
+                });
                 ui.label(
                     RichText::new(tr!(
                         "I link Spotify vengono sempre scaricati come audio.",
@@ -1861,6 +1931,11 @@ impl App {
                         .color(ui.visuals().weak_text_color()),
                     );
                 });
+                ui.checkbox(&mut self.cfg.site_folders, tr!("Video in cartelle per sito", "Videos in folders by site"))
+                    .on_hover_text(tr!(
+                        "Solo per i video: Facebook/…, RaiPlay/<programma>/…, YouTube/<canale>/…",
+                        "Videos only: Facebook/…, RaiPlay/<show>/…, YouTube/<channel>/…"
+                    ));
                 ui.checkbox(&mut self.cfg.music_folders, tr!("Musica in cartelle Artista / Album", "Music in Artist / Album folders"))
                     .on_hover_text(tr!(
                         "Solo per l'audio: i brani vanno in Artista/Album/01 - Titolo, come in iTunes e Plex.",
@@ -1882,7 +1957,7 @@ impl App {
                         self.start_setup(ctx);
                     }
                     if ui.button(tr!("Apri cartella dei download", "Open downloads folder")).clicked() {
-                        open_folder(&self.cfg.out_dir);
+                        open_folder(self.save_dir());
                     }
                 });
             });
@@ -2166,6 +2241,15 @@ impl App {
                                 .clicked()
                             {
                                 reveal(f);
+                            }
+                        }
+                        if let Some(t) = &j.transcript {
+                            if ui
+                                .small_button(tr!("Apri la trascrizione", "Open the transcript"))
+                                .on_hover_text(t.display().to_string())
+                                .clicked()
+                            {
+                                open_folder(t);
                             }
                         }
                     } else if j.state == JobState::Failed
@@ -3794,6 +3878,9 @@ fn loc(label: &'static str) -> &'static str {
         "FLAC (senza perdita)" => tr!("FLAC (senza perdita)", "FLAC (lossless)"),
         "WAV (senza perdita)" => tr!("WAV (senza perdita)", "WAV (lossless)"),
         "Nessuno" => tr!("Nessuno", "None"),
+        "Italiano e inglese" => tr!("Italiano e inglese", "Italian and English"),
+        "Italiano" => tr!("Italiano", "Italian"),
+        "Inglese" => tr!("Inglese", "English"),
         other => other,
     }
 }
