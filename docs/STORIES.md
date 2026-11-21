@@ -261,3 +261,19 @@ Accettazione:
 - [snap] Con 1024 KB/s un file si scarica a circa 1020 KB/s.
 - [manual] Sul Mac, un video con il limite acceso.
 Stato: fatta
+
+## Milestone 9: torrent tramite Transmission (0.11.0)
+
+Grabbit non contiene un motore torrent (libtorrent in C++ non parte su High Sierra): comanda
+Transmission già installato con la sua interfaccia remota. S-024
+
+### S-024 Torrent e magnet nella scheda «File»
+Come utente, incollo un link magnet o un indirizzo .torrent (o scelgo un file .torrent) nella scheda
+«File»: Grabbit lo passa a Transmission e mostra avanzamento, velocità e peer, con pausa e ripresa.
+Accettazione:
+- [unit] Magnet, indirizzi e file .torrent riconosciuti; nome dal `dn=` del magnet.
+- [unit] Con un finto Transmission: sessione (409), aggiunta con la cartella di «Salva in», file .torrent in base64, elenco, pausa, ripresa, «Togli» senza cancellare i file, limite di velocità.
+- [unit] Transmission spento: messaggio con il rimedio; il link si apre con l'app predefinita per i torrent.
+- [snap] Riquadro «Torrent» con righe (barra, velocità, peer) e stato «Transmission non risponde».
+- [manual] Sul Mac, un magnet di una distribuzione Linux.
+Stato: fatta

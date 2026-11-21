@@ -56,6 +56,9 @@ The interface is in Italian if your system language is Italian, and in English o
   connections, queues you can start, stop and schedule, pause and resume even after closing.
 - **Speed limit** in KB/s for all downloads, files, videos and music, so the network stays
   usable for others.
+- **Torrents and magnet links** via Transmission: paste them in the Files tab and Grabbit hands
+  them to Transmission and shows progress, speed and peers. In Transmission turn on
+  Preferences › Remote › “Enable remote access” (port 9091) and allow only 127.0.0.1.
 - **Sets itself up**: on first launch it downloads yt-dlp, ffmpeg and Deno
   (the JavaScript runtime yt-dlp needs for YouTube); on every launch it checks
   whether a newer yt-dlp exists and updates it.
@@ -197,6 +200,7 @@ To force the interface language (for testing): `GRABBIT_LANG=it` or `GRABBIT_LAN
 | `src/spotify.rs` | reads title/artist from Spotify links |
 | `src/selfupdate.rs` | automatic app updates |
 | `src/dm.rs`, `src/app/dm_tab.rs` | Files tab: download manager (adapted from Dropall) |
+| `src/torrent.rs`, `src/app/torrent_tab.rs` | torrents via Transmission's remote access |
 | `src/config.rs` | saved settings |
 | `src/i18n.rs` | interface language (Italian / English) |
 

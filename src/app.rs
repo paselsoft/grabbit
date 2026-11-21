@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 mod dm_tab;
+mod torrent_tab;
 
 // Tema scuro con accento arancione.
 const ACCENT: Color32 = Color32::from_rgb(249, 115, 22);
@@ -67,6 +68,10 @@ const BROWSERS: [(&str, &str); 7] = [
 enum Msg {
     /// cartella scelta con «Sfoglia…» nella scheda «File»
     DmFolder(PathBuf),
+    /// file .torrent scelti con «Scegli file .torrent…»
+    TorrentFiles(Vec<PathBuf>),
+    /// notizie dal lavoratore che parla con Transmission
+    Torrent(crate::torrent::Update),
     ToolsStatus(String),
     ToolsReady {
         ytdlp: String,
@@ -274,6 +279,11 @@ pub struct App {
     /// scheda «File»: download manager dei file (code, pianificazione, limite)
     dm: crate::dm::Manager,
     dm_ui: dm_tab::DmUi,
+    /// comandi per Transmission (eseguiti in sottofondo)
+    torrent_tx: Sender<crate::torrent::Cmd>,
+    torrents: torrent_tab::TorrentUi,
+    /// la scheda «File» è aperta: l'elenco dei torrent si rilegge spesso
+    torrent_watch: Arc<AtomicBool>,
 }
 
 impl App {
@@ -330,7 +340,27 @@ impl App {
                 crate::dm::Manager::new(state, move || ctx.request_repaint())
             },
             dm_ui: dm_tab::DmUi::new(0),
+            torrent_tx: channel().0,
+            torrents: Default::default(),
+            torrent_watch: Arc::new(AtomicBool::new(false)),
         };
+        {
+            let (ttx, trx) = channel();
+            app.torrent_tx = ttx;
+            let watch = app.torrent_watch.clone();
+            let send = app.sender(&cc.egui_ctx);
+            crate::torrent::spawn(
+                app.cfg.transmission_port,
+                trx,
+                move || watch.load(Ordering::Relaxed),
+                move |u| send(Msg::Torrent(u)),
+            );
+            if app.cfg.speed_limit_kbps > 0 {
+                let _ = app
+                    .torrent_tx
+                    .send(crate::torrent::Cmd::SpeedLimit(app.cfg.speed_limit_kbps));
+            }
+        }
         app.dm.set_speed_limit_kbps(app.cfg.speed_limit_kbps);
         app.dm_ui = dm_tab::DmUi::new(app.cfg.speed_limit_kbps);
         cc.egui_ctx
@@ -804,6 +834,14 @@ impl App {
                     true,
                 ))
             }
+            Msg::TorrentFiles(files) => {
+                let files = files
+                    .into_iter()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .collect();
+                self.add_torrents(files);
+            }
+            Msg::Torrent(u) => self.torrent_update(u),
             Msg::DmFolder(p) => {
                 self.cfg.dm_dir = p;
                 self.cfg.save();
@@ -963,6 +1001,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         self.player_keys(ctx);
+        self.torrent_watch
+            .store(self.tab == Tab::Files, Ordering::Relaxed);
         // il brano in ascolto resta in basso in tutte e due le schede
         self.now_playing_bar(ui);
         // «Scarica» e l'avanzamento restano visibili senza scorrere (sopra il player)

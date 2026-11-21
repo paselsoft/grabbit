@@ -57,6 +57,9 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   code da avviare, fermare e pianificare a un orario, pausa e ripresa anche dopo la chiusura.
 - **Limite di velocità** in KB/s per tutti i download, file, video e musica, così la rete
   resta libera per gli altri.
+- **Torrent e magnet** tramite Transmission: incollati nella scheda File, Grabbit li passa a
+  Transmission e ne mostra avanzamento, velocità e peer. In Transmission attiva Preferenze ›
+  Remoto › «Abilita accesso remoto» (porta 9091) e consenti solo l'indirizzo 127.0.0.1.
 - **Si prepara da solo**: al primo avvio scarica yt-dlp, ffmpeg e Deno
   (il runtime JavaScript che yt-dlp richiede per YouTube); a ogni avvio
   controlla se esiste un yt-dlp più recente e lo aggiorna.
@@ -198,6 +201,7 @@ Per forzare la lingua dell'interfaccia (prove): `GRABBIT_LANG=it` oppure `GRABBI
 | `src/spotify.rs` | legge titolo/artista dai link Spotify |
 | `src/selfupdate.rs` | aggiornamento automatico dell'app |
 | `src/dm.rs`, `src/app/dm_tab.rs` | scheda «File»: download manager (adattato da Dropall) |
+| `src/torrent.rs`, `src/app/torrent_tab.rs` | torrent tramite l'accesso remoto di Transmission |
 | `src/config.rs` | impostazioni salvate |
 | `src/i18n.rs` | lingua dell'interfaccia (italiano / inglese) |
 
