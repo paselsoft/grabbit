@@ -402,7 +402,7 @@ pub fn list_tracks(
 }
 
 /// Toglie i caratteri non ammessi nei nomi file.
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| {
@@ -1046,6 +1046,15 @@ fn add(a: &mut Vec<String>, items: &[&str]) {
     a.extend(items.iter().map(|s| s.to_string()));
 }
 
+/// Valore di `--limit-rate` per un singolo yt-dlp, o None senza limite.
+fn rate_limit(cfg: &Config) -> Option<String> {
+    if cfg.speed_limit_kbps == 0 {
+        return None;
+    }
+    let each = (cfg.speed_limit_kbps / cfg.parallel.clamp(1, 4)).max(1);
+    Some(format!("{each}K"))
+}
+
 fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     let audio = job.audio_only || cfg.mode == Mode::Audio;
     let mut a: Vec<String> = Vec::new();
@@ -1248,6 +1257,11 @@ fn build_args(job: &Job, cfg: &Config, tools: &Toolset) -> Vec<String> {
     }
     if let Some(js) = &tools.js {
         add(&mut a, &["--js-runtimes", &js.arg()]);
+    }
+    // limite di velocità (scheda «File»): diviso tra i download che vanno insieme,
+    // così in tutto non si supera
+    if let Some(rate) = rate_limit(cfg) {
+        add(&mut a, &["--limit-rate", &rate]);
     }
     // i cookie salvati del sito del link (Accesso ai siti), altrimenti quelli del browser
     a.extend(crate::logins::cookie_args(
@@ -2181,6 +2195,33 @@ esac
             ffmpeg_dir: Some("/ff".into()),
             js: Some(JsRuntime::deno("/dn/deno".into())),
         }
+    }
+
+    #[test]
+    fn speed_limit_is_split_between_parallel_downloads() {
+        let mut cfg = Config::default();
+        let j = job("https://youtu.be/x", None, false);
+        let a = build_args(&j, &cfg, &toolset());
+        assert!(!a.contains(&"--limit-rate".to_string()));
+        cfg.speed_limit_kbps = 1024;
+        cfg.parallel = 1;
+        assert!(has_pair(
+            &build_args(&j, &cfg, &toolset()),
+            "--limit-rate",
+            "1024K"
+        ));
+        cfg.parallel = 4;
+        assert!(has_pair(
+            &build_args(&j, &cfg, &toolset()),
+            "--limit-rate",
+            "256K"
+        ));
+        cfg.speed_limit_kbps = 2;
+        assert!(has_pair(
+            &build_args(&j, &cfg, &toolset()),
+            "--limit-rate",
+            "1K"
+        ));
     }
 
     fn has_pair(args: &[String], k: &str, v: &str) -> bool {

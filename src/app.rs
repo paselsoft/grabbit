@@ -16,6 +16,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod dm_tab;
+
 // Tema scuro con accento arancione.
 const ACCENT: Color32 = Color32::from_rgb(249, 115, 22);
 /// Arancione più chiaro: contorni e focus.
@@ -63,6 +65,8 @@ const BROWSERS: [(&str, &str); 7] = [
 ];
 
 enum Msg {
+    /// cartella scelta con «Sfoglia…» nella scheda «File»
+    DmFolder(PathBuf),
     ToolsStatus(String),
     ToolsReady {
         ytdlp: String,
@@ -267,6 +271,9 @@ pub struct App {
     /// «Accesso ai siti»: sito in aggiornamento ed esito dell'ultimo aggiornamento
     login_busy: Option<&'static str>,
     login_notice: Option<(String, bool)>,
+    /// scheda «File»: download manager dei file (code, pianificazione, limite)
+    dm: crate::dm::Manager,
+    dm_ui: dm_tab::DmUi,
 }
 
 impl App {
@@ -317,7 +324,15 @@ impl App {
             clip_offer: None,
             login_busy: None,
             login_notice: None,
+            dm: {
+                let ctx = cc.egui_ctx.clone();
+                let state = tools::project_dirs().map(|d| d.config_dir().join("downloads.json"));
+                crate::dm::Manager::new(state, move || ctx.request_repaint())
+            },
+            dm_ui: dm_tab::DmUi::new(0),
         };
+        app.dm.set_speed_limit_kbps(app.cfg.speed_limit_kbps);
+        app.dm_ui = dm_tab::DmUi::new(app.cfg.speed_limit_kbps);
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
         app.start_setup(&cc.egui_ctx);
@@ -683,9 +698,10 @@ impl App {
             Msg::UpdateStatus(s) => self.update = UpdateUi::Working(s),
             Msg::UpdateDone(Ok(())) => {
                 // aggiornamento partito da solo all'avvio: si riavvia da sé, a meno che
-                // nel frattempo non sia iniziato un download
-                if self.update_auto && !self.running {
+                // nel frattempo non sia iniziato un download (anche nella scheda «File»)
+                if self.update_auto && !self.running && !self.dm.any_active() {
                     self.cfg.save();
+                    self.dm.shutdown();
                     selfupdate::restart();
                 }
                 self.update = UpdateUi::Ready(
@@ -787,6 +803,10 @@ impl App {
                     ),
                     true,
                 ))
+            }
+            Msg::DmFolder(p) => {
+                self.cfg.dm_dir = p;
+                self.cfg.save();
             }
             Msg::PlayerDir(p) => {
                 self.cfg.player_dir = Some(p);
@@ -924,6 +944,12 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cfg.save();
+        // i file a metà restano in pausa e ripartono alla prossima apertura
+        self.dm.shutdown();
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(m) = self.rx.try_recv() {
             self.handle(m, ctx);
@@ -967,6 +993,22 @@ impl eframe::App for App {
                             self.log_view(ui, ctx);
                         }
                         Tab::Listen => self.listen_view(ui, ctx),
+                        Tab::Files => {
+                            let before = (
+                                self.cfg.dm_dir.clone(),
+                                self.cfg.dm_connections,
+                                self.cfg.speed_limit_kbps,
+                            );
+                            self.dm_tab(ui, ctx);
+                            if (
+                                self.cfg.dm_dir.clone(),
+                                self.cfg.dm_connections,
+                                self.cfg.speed_limit_kbps,
+                            ) != before
+                            {
+                                self.cfg.save();
+                            }
+                        }
                     }
                     ui.add_space(6.0);
                     self.footer(ui);
@@ -986,6 +1028,60 @@ fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
             add(ui)
         })
         .inner
+}
+
+/// Interruttore con lo sfondo arancione quando è attivo (scheda «File»).
+fn accent_toggle(
+    ui: &mut egui::Ui,
+    selected: bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let old = (
+        ui.visuals().selection.bg_fill,
+        ui.visuals().selection.stroke,
+    );
+    ui.visuals_mut().selection.bg_fill = ACCENT;
+    ui.visuals_mut().selection.stroke = egui::Stroke::new(1.0, ON_ACCENT);
+    let r = ui.selectable_label(selected, text);
+    ui.visuals_mut().selection.bg_fill = old.0;
+    ui.visuals_mut().selection.stroke = old.1;
+    r
+}
+
+/// Barra di avanzamento sottile con la percentuale a destra.
+fn progress_row(ui: &mut egui::Ui, fraction: f32) {
+    let f = fraction.clamp(0.0, 1.0);
+    ui.horizontal(|ui| {
+        let w = (ui.available_width() - 56.0).max(40.0);
+        ui.add(
+            egui::ProgressBar::new(f)
+                .fill(ACCENT)
+                .desired_width(w)
+                .desired_height(8.0)
+                .corner_radius(4),
+        );
+        let pct = (f * 100.0).floor() as u32;
+        ui.add_sized(
+            [44.0, 16.0],
+            egui::Label::new(RichText::new(format!("{pct}%")).strong()),
+        );
+    });
+}
+
+/// Cmd+V in un campo che non riceve l'incolla da solo: chiede gli appunti alla finestra.
+fn paste_fallback(ctx: &egui::Context, resp: &egui::Response) {
+    if !resp.has_focus() {
+        return;
+    }
+    let (pressed, got) = ctx.input(|i| {
+        (
+            i.modifiers.command && i.key_pressed(egui::Key::V),
+            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+        )
+    });
+    if pressed && !got {
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+    }
 }
 
 impl App {
@@ -1093,6 +1189,8 @@ impl App {
             self.start_update(ctx, r, false);
         }
         if restart {
+            self.cfg.save();
+            self.dm.shutdown();
             selfupdate::restart();
         }
         ui.add_space(6.0);
@@ -2526,6 +2624,7 @@ enum Tab {
     #[default]
     Download,
     Listen,
+    Files,
 }
 
 #[derive(Default)]
@@ -3063,6 +3162,7 @@ impl App {
             for (tab, label) in [
                 (Tab::Download, tr!("  Scarica  ", "  Download  ")),
                 (Tab::Listen, tr!("  Ascolta  ", "  Listen  ")),
+                (Tab::Files, tr!("  File  ", "  Files  ")),
             ] {
                 let on = self.tab == tab;
                 let text = RichText::new(label).size(17.0).strong().color(if on {

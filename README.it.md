@@ -53,6 +53,10 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   con «Aggiungi».
 - **Barra dei download** sempre visibile in basso: **Scarica** con il numero di link, oppure
   **Annulla** con l'avanzamento totale; elenco brano per brano con avanzamento in tempo reale.
+- **Scheda File**: download manager per file normali (http e https), con più connessioni,
+  code da avviare, fermare e pianificare a un orario, pausa e ripresa anche dopo la chiusura.
+- **Limite di velocità** in KB/s per tutti i download, file, video e musica, così la rete
+  resta libera per gli altri.
 - **Si prepara da solo**: al primo avvio scarica yt-dlp, ffmpeg e Deno
   (il runtime JavaScript che yt-dlp richiede per YouTube); a ogni avvio
   controlla se esiste un yt-dlp più recente e lo aggiorna.
@@ -193,6 +197,7 @@ Per forzare la lingua dell'interfaccia (prove): `GRABBIT_LANG=it` oppure `GRABBI
 | `src/tools.rs` | scarica/aggiorna yt-dlp, Deno, ffmpeg |
 | `src/spotify.rs` | legge titolo/artista dai link Spotify |
 | `src/selfupdate.rs` | aggiornamento automatico dell'app |
+| `src/dm.rs`, `src/app/dm_tab.rs` | scheda «File»: download manager (adattato da Dropall) |
 | `src/config.rs` | impostazioni salvate |
 | `src/i18n.rs` | lingua dell'interfaccia (italiano / inglese) |
 
@@ -219,3 +224,6 @@ Grabbit è software libero, rilasciato con la
 [Licenza Pubblica Generica GNU v3.0 o successive](https://www.gnu.org/licenses/gpl-3.0.html)
 (`GPL-3.0-or-later`); vedi `LICENSE`. Puoi usarlo, studiarlo, condividerlo e modificarlo; se
 distribuisci versioni modificate, devi rilasciarle con la stessa licenza e con i sorgenti.
+
+Il download manager della scheda «File» (`src/dm.rs`, `src/app/dm_tab.rs`) è adattato da
+[Dropall](https://github.com/marcogiannini/dropall) di Marco Giannini, con la stessa licenza.

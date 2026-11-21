@@ -18,6 +18,8 @@ eframe = { version = "0.37", default-features = false, features = [
 rfd = "0.17"
 # «Sposta nel Cestino» degli album in «Ascolta» (sul Mac passa dal Finder: si può ripristinare)
 trash = "5.3"
+# ora locale per il pianificatore delle code del download manager (Rust puro)
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # lettura degli appunti per proporre il link appena copiato (la stessa usata da eframe)
 arboard = { version = "3.7", default-features = false }
 # png per l'icona; jpeg e webp per le copertine nei risultati della ricerca
