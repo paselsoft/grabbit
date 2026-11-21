@@ -113,6 +113,9 @@ pub fn filter_cookies(text: &str, domains: &[&str]) -> (String, usize) {
     (out, kept)
 }
 
+/// Intestazione di un file di cookie che yt-dlp accetta come valido (anche senza cookie).
+const NETSCAPE_HEADER: &str = "# Netscape HTTP Cookie File\n";
+
 /// Scrive un file leggibile solo dall'utente (sui sistemi Unix, permessi 600).
 fn write_private(path: &Path, text: &str) -> Result<()> {
     #[cfg(unix)]
@@ -150,8 +153,10 @@ pub fn refresh(site: &Site, browser: &str, tools: &Toolset, dir: &Path) -> Resul
     }
     let tmp = dir.join(format!(".{}.tutti.tmp", site.key));
     let _ = std::fs::remove_file(&tmp);
-    // il file temporaneo nasce vuoto e privato: yt-dlp lo riscrive mantenendo i permessi
-    write_private(&tmp, "")?;
+    // il file temporaneo nasce privato e già valido: yt-dlp prima lo legge (un file vuoto
+    // lo rifiuta con «does not look like a Netscape format cookies file»), poi lo riscrive
+    // con i cookie del browser mantenendo i permessi
+    write_private(&tmp, NETSCAPE_HEADER)?;
     let out = crate::tools::command(&tools.ytdlp)
         .args([
             "--cookies-from-browser",
@@ -180,24 +185,21 @@ pub fn refresh(site: &Site, browser: &str, tools: &Toolset, dir: &Path) -> Resul
             .trim_start_matches("ERROR:")
             .trim()
             .to_string();
+        if !last.is_empty() {
+            // yt-dlp si è fermato prima di leggere i cookie: si mostra il suo errore
+            bail!(tr!(
+                format!("non riesco a leggere i cookie da {browser}: {last}"),
+                format!("could not read the cookies from {browser}: {last}")
+            ));
+        }
         bail!(tr!(
             format!(
-                "nessun cookie di {} nel browser: entra nel sito con il browser e riprova{}",
-                site.name,
-                if last.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({last})")
-                }
+                "nessun cookie di {} in {browser}: entra nel sito con quel browser e riprova",
+                site.name
             ),
             format!(
-                "no {} cookies in the browser: sign in to the site in the browser and try again{}",
-                site.name,
-                if last.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({last})")
-                }
+                "no {} cookies in {browser}: sign in to the site with that browser and try again",
+                site.name
             )
         ));
     }
@@ -277,6 +279,7 @@ mod tests {
         std::fs::write(
             &fake,
             "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = --cookies ]; then f=\"$2\"; fi; shift; done\n\
+if [ -f \"$f\" ] && ! head -1 \"$f\" | grep -q 'Netscape HTTP Cookie File'; then echo \"ERROR: '$f' does not look like a Netscape format cookies file\" >&2; exit 1; fi\n\
 printf '# Netscape HTTP Cookie File\\n.facebook.com\\tTRUE\\t/\\tTRUE\\t0\\tc_user\\t1\\n.google.com\\tTRUE\\t/\\tTRUE\\t0\\tSID\\t3\\n' > \"$f\"\n",
         )
         .unwrap();
