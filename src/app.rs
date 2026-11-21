@@ -2203,26 +2203,42 @@ impl App {
                 }
                 // seconda riga: stato a parole e l'azione possibile su quel brano
                 ui.horizontal(|ui| {
-                    if j.state == JobState::Running {
-                        // percentuale del brano davanti a velocità e tempo rimasto
+                    // percentuale del brano davanti a velocità e tempo rimasto
+                    let text = if j.state == JobState::Running {
                         let pct = format!("{:.0}%", j.pct * 100.0);
-                        let text = if j.detail.is_empty() {
+                        if j.detail.is_empty() {
                             pct
                         } else {
                             format!("{pct} · {}", j.detail)
-                        };
-                        ui.label(
-                            RichText::new(text)
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                    } else if !j.detail.is_empty() {
+                        }
+                    } else {
+                        j.detail.clone()
+                    };
+                    if !text.is_empty() {
                         let col = if j.state == JobState::Failed {
                             ERR
                         } else {
                             ui.visuals().weak_text_color()
                         };
-                        ui.label(RichText::new(&j.detail).small().color(col));
+                        // i nomi lunghi si accorciano con «…»: i pulsanti restano visibili
+                        let reserve = match j.state {
+                            JobState::Done if j.transcript.is_some() => 330.0,
+                            JobState::Done => 170.0,
+                            _ => 90.0,
+                        };
+                        let w = (ui.available_width() - reserve).max(80.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(w, 18.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_max_width(w);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&text).small().color(col))
+                                        .truncate(),
+                                )
+                                .on_hover_text(&text);
+                            },
+                        );
                     }
                     let busy = matches!(j.state, JobState::Running | JobState::Waiting);
                     if busy && self.running {
@@ -3630,7 +3646,8 @@ impl App {
                         }
                     });
                     ui.vertical(|ui| {
-                        ui.set_max_width((ui.available_width() - 150.0).max(80.0));
+                        // a destra restano volume e percentuale
+                        ui.set_max_width((ui.available_width() - 230.0).max(80.0));
                         ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
                         let who = if track.artist.is_empty() {
                             album.1.clone()

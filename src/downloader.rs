@@ -738,6 +738,13 @@ fn execute(
     });
 }
 
+/// Errore di yt-dlp che può venire solo dalla conversione della copertina (il file c'è
+/// comunque, con la copertina originale inserita). Gli errori dei passi su audio e video
+/// arrivano come «Postprocessing: …».
+fn only_cover_error(e: &str) -> bool {
+    e.trim() == "Conversion failed!"
+}
+
 /// Link a un singolo video di YouTube, senza playlist: inutile cercare il titolo di una playlist.
 fn looks_like_single_video(url: &str) -> bool {
     let u = url.trim().to_lowercase();
@@ -1255,6 +1262,12 @@ fn run_job(
 
     let mut last_pct = 0.0f32;
     let mut last_error: Option<String> = None;
+    // un errore che non riguarda solo la copertina (vedi `only_cover_error`)
+    let mut real_error = false;
+    // copertine convertite ed errori «Conversion failed!» (stdout e stderr arrivano in ordine
+    // sparso: si contano, non si guarda quale riga viene prima)
+    let mut cover_conversions = 0usize;
+    let mut cover_errors = 0usize;
     let mut files = 0usize;
     let mut last_file = String::new();
     let mut title_seen = false;
@@ -1318,7 +1331,16 @@ fn run_job(
             });
         } else {
             if is_err && line.starts_with("ERROR") {
-                last_error = Some(line.trim_start_matches("ERROR:").trim().to_string());
+                let e = line.trim_start_matches("ERROR:").trim().to_string();
+                if only_cover_error(&e) {
+                    cover_errors += 1;
+                } else {
+                    real_error = true;
+                }
+                last_error = Some(e);
+            }
+            if line.starts_with("[ThumbnailsConvertor] Converting thumbnail") {
+                cover_conversions += 1;
             }
             if line.starts_with("[Merger]")
                 || line.starts_with("[ExtractAudio]")
@@ -1340,7 +1362,10 @@ fn run_job(
     if cancelled {
         return (false, tr!("Annullato", "Cancelled").into(), None, None);
     }
-    let success = status.map(|s| s.success()).unwrap_or(false);
+    // il file è salvato e l'unico errore è la conversione della copertina (RaiPlay dà
+    // copertine PNG che a volte ffmpeg non converte): il download è riuscito
+    let success = status.map(|s| s.success()).unwrap_or(false)
+        || (files > 0 && last_error.is_some() && !real_error && cover_errors <= cover_conversions);
     match (success, files) {
         (true, _) | (false, 1..) => {
             let name = std::path::Path::new(&last_file)
@@ -2297,6 +2322,73 @@ esac
         assert_eq!(made, vec![dir.join("Video.it.txt")]);
         assert!(!dir.join("Altro.en.txt").exists());
         assert_eq!(transcript_of(&video), Some(dir.join("Video.it.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RaiPlay: la copertina PNG non si converte, ma il video è salvato: download riuscito.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_cover_conversion_is_not_a_failed_download() {
+        let _guard = fake_ytdlp_lock();
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("grabbit-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-yt-dlp");
+        // primo link: solo la copertina fallisce; secondo: fallisce l'audio
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nlast=\"\"; for a in \"$@\"; do last=\"$a\"; done\n\
+echo '[ThumbnailsConvertor] Converting thumbnail \"x.png\" to jpg'\n\
+case \"$last\" in *bad*) echo '[ExtractAudio] Destination: x.m4a'; echo 'ERROR: Postprocessing: audio conversion failed: Conversion failed!' >&2;;\n\
+*) echo 'ERROR: Conversion failed!' >&2;; esac\n\
+echo \"GRBFILE|/x/$last.mp4\"\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = Toolset {
+            ytdlp: fake,
+            ffmpeg_dir: None,
+            js: None,
+        };
+        let cfg = Config {
+            mode: Mode::Video,
+            out_dir: dir.clone(),
+            video_dir: dir.clone(),
+            parallel: 1,
+            ..Config::default()
+        };
+        let res = Arc::new(std::sync::Mutex::new(Vec::<(bool, String)>::new()));
+        let r = res.clone();
+        let emit: Emit = Arc::new(move |e| {
+            if let Event::JobFinished { ok, detail, .. } = e {
+                r.lock().unwrap().push((ok, detail));
+            }
+        });
+        run(
+            vec![
+                "https://www.raiplay.it/video/good.html".into(),
+                "https://www.raiplay.it/video/bad.html".into(),
+            ],
+            cfg,
+            tools,
+            0,
+            emit,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            StopSet::default(),
+        );
+        let res = res.lock().unwrap();
+        assert_eq!(res.len(), 2);
+        assert!(
+            res[0].0 && !res[0].1.contains("in parte") && !res[0].1.contains("Partially"),
+            "{res:?}"
+        );
+        // un errore vero dopo un'altra fase resta «in parte»
+        assert!(
+            res[1].1.contains("in parte") || res[1].1.contains("Partially"),
+            "{res:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

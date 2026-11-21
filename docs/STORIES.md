@@ -190,14 +190,14 @@ Accettazione:
 - [unit] Un .srt con numeri, orari, etichette e righe ripetute diventa un testo pulito; solo i sottotitoli del video appena scaricato.
 - [snap] La casella e il menu delle lingue in modo Video.
 - [manual] Sul Mac un video RaiPlay con sottotitoli e uno YouTube con sottotitoli automatici: «Apri la trascrizione» apre il .txt.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-017 Scegliere il nome del file
 Come utente, con un solo link compare «Nome del file (facoltativo)» e il video si salva con quel nome.
 Accettazione:
 - [unit] Il nome, pulito dai caratteri non ammessi, diventa il nome del file nelle stesse cartelle.
 - [snap] Il campo compare con un solo link, non con due.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-018 Video nella cartella Filmati, per sito
 Come utente, i video vanno nella cartella Filmati (Grabbit), in una cartella per sito e per programma
@@ -206,4 +206,4 @@ Accettazione:
 - [unit] Il sito si riconosce dal link (Facebook, fb.watch, RaiPlay, RaiPlay Sound, YouTube, Vimeo, un sito qualsiasi).
 - [unit] Video in `<cartella video>/<sito>/<programma o canale>/Titolo`; audio nella cartella della musica; opzione spenta come prima.
 - [snap] «Salva in» mostra la cartella del modo scelto; «Video in cartelle per sito» nelle opzioni avanzate.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
