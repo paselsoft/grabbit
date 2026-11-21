@@ -220,14 +220,14 @@ Accettazione:
 - [unit] Un link del sito riceve `--cookies <file del sito>`, gli altri il browser di «Usa i cookie del browser» o niente.
 - [snap] Sezione con il browser, una riga per sito («non impostato», «aggiornato oggi»), «Aggiorna l'accesso», «Togli», esito in verde o rosso.
 - [manual] Sul Mac, un reel di Facebook che senza accesso non si scarica.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-020 Sito nell'elenco e messaggi chiari
 Come utente, ogni riga dei download dice il sito, e gli errori comuni hanno un messaggio con il rimedio.
 Accettazione:
 - [unit] DRM, accesso richiesto (con il rimedio giusto per il sito), blocco per paese, robot di YouTube, link non supportato, contenuto rimosso.
 - [snap] «RaiPlay», «RaiPlay Sound» davanti al titolo nella riga.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
 
 ### S-021 RaiPlay Sound in audio, nella cartella Podcast
 Come utente, i link RaiPlay Sound si scaricano sempre come audio in `Musica/Grabbit/Podcast/<programma>/`,
@@ -235,4 +235,4 @@ e in «Ascolta» stanno nel gruppo «Podcast».
 Accettazione:
 - [unit] Un link RaiPlay Sound è audio, nella cartella della musica, in «Podcast/<programma>/Titolo».
 - [manual] Sul Mac, una puntata di un programma RaiPlay Sound.
-Stato: fatta (manca la prova [manual] sul Mac)
+Stato: fatta
