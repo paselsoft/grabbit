@@ -60,6 +60,14 @@ pub struct Config {
     pub last_pos: f32,
     /// volume uguale tra i brani (correzione misurata per ogni brano)
     pub normalize: bool,
+    /// cartella dei video (la musica resta in `out_dir`)
+    pub video_dir: PathBuf,
+    /// video in cartelle per sito: «Facebook/…», «RaiPlay/<programma>/…», «YouTube/<canale>/…»
+    pub site_folders: bool,
+    /// video: sottotitoli (anche automatici) nel file, in .srt e come trascrizione .txt
+    pub subtitles: bool,
+    /// lingue dei sottotitoli: "it", "en" o "it,en"
+    pub sub_langs: String,
 }
 
 impl Default for Config {
@@ -71,9 +79,17 @@ impl Default for Config {
                     .unwrap_or_else(|| u.home_dir().join("Downloads"))
             })
             .unwrap_or_else(|| PathBuf::from("."));
+        // i video nella cartella Filmati del Mac (Video su Windows e Linux), in «Grabbit»
+        let video_dir = directories::UserDirs::new()
+            .and_then(|u| u.video_dir().map(|p| p.join("Grabbit")))
+            .unwrap_or_else(|| out_dir.clone());
         Self {
             mode: Mode::Video,
             out_dir,
+            video_dir,
+            site_folders: true,
+            subtitles: false,
+            sub_langs: "it,en".into(),
             video_container: "mp4".into(),
             max_height: 1080,
             audio_format: "mp3".into(),
