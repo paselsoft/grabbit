@@ -76,6 +76,8 @@ pub struct Config {
     pub dm_connections: u8,
     /// limite di velocità in KB/s per tutti i download (0 = nessun limite)
     pub speed_limit_kbps: u32,
+    /// porta dell'accesso remoto di Transmission (Preferenze › Remoto)
+    pub transmission_port: u16,
 }
 
 impl Default for Config {
@@ -96,6 +98,7 @@ impl Default for Config {
             dm_dir: out_dir.clone(),
             dm_connections: 8,
             speed_limit_kbps: 0,
+            transmission_port: crate::torrent::DEFAULT_PORT,
             out_dir,
             video_dir,
             site_folders: true,

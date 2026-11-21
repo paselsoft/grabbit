@@ -73,6 +73,8 @@ impl App {
         self.dm_speed_card(ui);
         ui.add_space(8.0);
         self.dm_queues(ui, &snap.queues, &snap.items);
+        ui.add_space(8.0);
+        self.torrent_card(ui);
     }
 
     fn dm_add_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, queues: &[Queue]) {
@@ -89,6 +91,21 @@ impl App {
                 if ui.small_button(tr!("Svuota", "Clear")).clicked() {
                     self.dm_ui.input.clear();
                 }
+                if ui
+                    .small_button(tr!("Scegli file .torrent…", "Choose .torrent files…"))
+                    .clicked()
+                {
+                    let send = self.sender(ctx);
+                    thread::spawn(move || {
+                        if let Some(files) = rfd::FileDialog::new()
+                            .set_title(tr!("Scegli i file .torrent", "Choose .torrent files"))
+                            .add_filter("torrent", &["torrent"])
+                            .pick_files()
+                        {
+                            send(Msg::TorrentFiles(files));
+                        }
+                    });
+                }
             });
             let resp = ui.add(
                 egui::TextEdit::multiline(&mut self.dm_ui.input)
@@ -96,8 +113,8 @@ impl App {
                     .desired_rows(3)
                     .desired_width(f32::INFINITY)
                     .hint_text(tr!(
-                        "Incolla qui uno o più indirizzi http(s) di file, uno per riga",
-                        "Paste one or more http(s) file addresses here, one per line"
+                        "Incolla qui uno o più indirizzi http(s) di file, o link magnet e .torrent, uno per riga",
+                        "Paste one or more http(s) file addresses, or magnet and .torrent links, one per line"
                     )),
             );
             super::paste_fallback(ui.ctx(), &resp);
@@ -213,7 +230,17 @@ impl App {
                 });
                 let go = r1.clicked();
                 if go || r2.clicked() {
-                    let plain = self.dm_ui.input.clone();
+                    // magnet e .torrent vanno a Transmission
+                    let (tor, plain): (Vec<&str>, Vec<&str>) = self
+                        .dm_ui
+                        .input
+                        .lines()
+                        .map(|l| l.trim())
+                        .filter(|l| !l.is_empty())
+                        .partition(|l| crate::torrent::is_torrent_source(l));
+                    let tor: Vec<String> = tor.into_iter().map(String::from).collect();
+                    let plain = plain.join("\n");
+                    self.add_torrents(tor);
                     let n = self.dm.add(
                         &plain,
                         &self.cfg.dm_dir,
@@ -231,7 +258,9 @@ impl App {
             if !self.dm_ui.input.trim().is_empty()
                 && !self.dm_ui.input.lines().any(|l| {
                     let t = l.trim();
-                    t.starts_with("http://") || t.starts_with("https://")
+                    t.starts_with("http://")
+                        || t.starts_with("https://")
+                        || crate::torrent::is_torrent_source(t)
                 })
             {
                 ui.label(
@@ -300,11 +329,14 @@ impl App {
             }
             if self.cfg.speed_limit_kbps != before {
                 self.dm.set_speed_limit_kbps(self.cfg.speed_limit_kbps);
+                let _ = self
+                    .torrent_tx
+                    .send(crate::torrent::Cmd::SpeedLimit(self.cfg.speed_limit_kbps));
             }
             ui.label(
                 RichText::new(tr!(
-                    "Vale per tutti i download di Grabbit, video e musica compresi, così gli altri possono usare la rete. Per i video già avviati vale dal prossimo.",
-                    "Applies to all Grabbit downloads, including video and music, so others can use the network. For videos already started it applies from the next one."
+                    "Vale per tutti i download di Grabbit, video, musica e torrent di Transmission compresi, così gli altri possono usare la rete. Per i video già avviati vale dal prossimo.",
+                    "Applies to all Grabbit downloads, including video, music and Transmission torrents, so others can use the network. For videos already started it applies from the next one."
                 ))
                 .small()
                 .color(ui.visuals().weak_text_color()),

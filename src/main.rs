@@ -14,6 +14,7 @@ mod search;
 mod selfupdate;
 mod spotify;
 mod tools;
+mod torrent;
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -59,6 +60,8 @@ mod tests {
         for (name, src) in [
             ("app.rs", include_str!("app.rs")),
             ("app/dm_tab.rs", include_str!("app/dm_tab.rs")),
+            ("app/torrent_tab.rs", include_str!("app/torrent_tab.rs")),
+            ("torrent.rs", include_str!("torrent.rs")),
             ("dm.rs", include_str!("dm.rs")),
             ("logins.rs", include_str!("logins.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
