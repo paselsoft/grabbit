@@ -68,6 +68,8 @@ pub struct Config {
     pub subtitles: bool,
     /// lingue dei sottotitoli: "it", "en" o "it,en"
     pub sub_langs: String,
+    /// browser da cui «Accesso ai siti» copia i cookie
+    pub login_browser: String,
 }
 
 impl Default for Config {
@@ -90,6 +92,7 @@ impl Default for Config {
             site_folders: true,
             subtitles: false,
             sub_langs: "it,en".into(),
+            login_browser: "chrome".into(),
             video_container: "mp4".into(),
             max_height: 1080,
             audio_format: "mp3".into(),

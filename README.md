@@ -31,7 +31,10 @@ The interface is in Italian if your system language is Italian, and in English o
 - **Choose the tracks** of an album before downloading it, with checkboxes.
 - **Videos from any site** yt-dlp knows (YouTube, Facebook, RaiPlay…), in the Movies folder by site
   and show or channel; **subtitles and transcript** (.srt inside the video and next to it, plus a clean
-  .txt); a **file name** of your choice for a single link. MP3, M4A, FLAC, WAV and OGG (not Opus).
+  .txt); a **file name** of your choice for a single link.
+- **Site sign-in** (Facebook, Instagram, RaiPlay): one site's cookies, copied once from the browser
+  and used only for its links; clear messages for DRM, sign-in needed and country blocks;
+  **RaiPlay Sound** (radio and podcasts) as audio, in the "Podcast" folder. MP3, M4A, FLAC, WAV and OGG (not Opus).
 - **Several downloads at once** (3 by default, 1 to 4 in the advanced options): an album is split
   into its tracks, downloaded in parallel, with the track number also in the metadata.
 - **Playlists**: files go into a folder named after the playlist and are called

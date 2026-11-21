@@ -2,6 +2,7 @@
 //! Interfaccia grafica (egui).
 use crate::config::{Config, Mode, Repeat};
 use crate::downloader::{self, Emit, Event, JsRuntime, Toolset};
+use crate::logins;
 use crate::player;
 use crate::search::{self, SearchResult};
 use crate::selfupdate::{self, Release};
@@ -104,6 +105,11 @@ enum Msg {
     Trashed(Result<PathBuf, String>),
     /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
     MusicAdded(Result<String, String>),
+    /// «Aggiorna l'accesso» finito per un sito (cookie salvati, o errore)
+    LoginDone {
+        site: &'static str,
+        result: Result<usize, String>,
+    },
     /// correzione di volume misurata per un brano (`None`: non misurabile)
     Gain {
         path: PathBuf,
@@ -137,6 +143,8 @@ struct JobUi {
     file: Option<PathBuf>,
     /// trascrizione .txt del video, per «Apri la trascrizione»
     transcript: Option<PathBuf>,
+    /// sito del link («Facebook», «RaiPlay»), mostrato davanti al titolo
+    site: Option<String>,
 }
 
 enum UpdateUi {
@@ -256,6 +264,9 @@ pub struct App {
     clip_seen: String,
     /// link appena copiato, proposto con «Aggiungi»
     clip_offer: Option<String>,
+    /// «Accesso ai siti»: sito in aggiornamento ed esito dell'ultimo aggiornamento
+    login_busy: Option<&'static str>,
+    login_notice: Option<(String, bool)>,
 }
 
 impl App {
@@ -304,6 +315,8 @@ impl App {
             was_focused: false,
             clip_seen: String::new(),
             clip_offer: None,
+            login_busy: None,
+            login_notice: None,
         };
         cc.egui_ctx
             .set_zoom_factor(app.cfg.ui_scale.clamp(0.8, 2.0));
@@ -686,6 +699,29 @@ impl App {
             Msg::UpdateDone(Err(e)) => {
                 self.update = UpdateUi::Failed(selfupdate::describe_apply_error(&e))
             }
+            Msg::LoginDone { site, result } => {
+                self.login_busy = None;
+                let name = logins::SITES
+                    .iter()
+                    .find(|s| s.key == site)
+                    .map_or(site, |s| s.name);
+                self.login_notice = Some(match result {
+                    Ok(n) => (
+                        tr!(
+                            format!("Accesso a {name} aggiornato ({n} cookie)."),
+                            format!("{name} sign-in updated ({n} cookies).")
+                        ),
+                        false,
+                    ),
+                    Err(e) => (
+                        tr!(
+                            format!("Accesso a {name} non aggiornato: {e}"),
+                            format!("{name} sign-in not updated: {e}")
+                        ),
+                        true,
+                    ),
+                });
+            }
             Msg::Folder(p, Mode::Video) => self.cfg.video_dir = p,
             Msg::Folder(p, Mode::Audio) => self.cfg.out_dir = p,
             Msg::Gain { path, gain } => {
@@ -824,6 +860,7 @@ impl App {
                     self.next_id = self.next_id.max(id + 1);
                     self.jobs.push(JobUi {
                         id,
+                        site: downloader::site_name(&label),
                         label,
                         pct: 0.0,
                         detail: String::new(),
@@ -1863,8 +1900,8 @@ impl App {
                 });
                 ui.label(
                     RichText::new(tr!(
-                        "I link Spotify vengono sempre scaricati come audio.",
-                        "Spotify links are always downloaded as audio."
+                        "I link Spotify e RaiPlay Sound (radio e podcast) vengono sempre scaricati come audio.",
+                        "Spotify and RaiPlay Sound (radio and podcast) links are always downloaded as audio."
                     ))
                     .small()
                     .color(ui.visuals().weak_text_color()),
@@ -1883,6 +1920,7 @@ impl App {
                         });
                 });
                 ui.label(RichText::new(tr!("Utile per video con restrizioni d'età o quando YouTube chiede di dimostrare che non sei un robot.", "Useful for age-restricted videos or when YouTube asks you to prove you are not a robot.")).small().color(ui.visuals().weak_text_color()));
+                self.logins_section(ui, ctx);
                 ui.horizontal(|ui| {
                     ui.label(tr!("Dimensione del testo", "Text size"));
                     let sizes = [
@@ -2185,6 +2223,13 @@ impl App {
                         JobState::Done => tr!("completato", "completed"),
                         JobState::Failed => tr!("non riuscito", "failed"),
                     };
+                    if let Some(site) = &j.site {
+                        ui.label(
+                            RichText::new(site)
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
                     let resp = ui.add(egui::Label::new(&j.label).truncate());
                     // il colore da solo non basta: lo stato va detto anche a parole
                     resp.widget_info(|| {
@@ -3424,6 +3469,116 @@ impl App {
             self.listen.confirm_trash = confirm;
         }
         self.trash_dialog(ctx);
+    }
+
+    /// «Accesso ai siti»: per ogni sito, i cookie copiati una volta dal browser e usati solo
+    /// per quel sito.
+    fn logins_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.add_space(4.0);
+        ui.label(RichText::new(tr!("Accesso ai siti", "Site sign-in")).strong());
+        ui.label(
+            RichText::new(tr!(
+                "Per i video che richiedono l'accesso. Entra nel sito con il browser, poi premi «Aggiorna l'accesso»: Grabbit copia i cookie di quel sito e li usa solo per i suoi link.",
+                "For videos that need you to sign in. Sign in to the site in the browser, then press “Update sign-in”: Grabbit copies that site's cookies and uses them only for its links."
+            ))
+            .small()
+            .color(ui.visuals().weak_text_color()),
+        );
+        ui.horizontal(|ui| {
+            let label = ui.label(tr!("Dal browser", "From browser"));
+            egui::ComboBox::from_id_salt("login_browser")
+                .selected_text(label_of(&BROWSERS, &self.cfg.login_browser))
+                .show_ui(ui, |ui| {
+                    for (v, l) in BROWSERS.iter().filter(|(v, _)| !v.is_empty()) {
+                        if ui
+                            .selectable_value(&mut self.cfg.login_browser, v.to_string(), loc(l))
+                            .clicked()
+                        {
+                            self.cfg.save();
+                        }
+                    }
+                })
+                .response
+                .labelled_by(label.id);
+        });
+        let dir = logins::cookie_dir();
+        let can = self.login_busy.is_none() && self.tools.ytdlp.is_some() && !self.tools.busy;
+        let mut refresh: Option<&'static logins::Site> = None;
+        for site in logins::SITES.iter() {
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(90.0, 18.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(90.0);
+                        ui.label(site.name);
+                    },
+                );
+                let status = match logins::updated(&dir, site) {
+                    Some(t) => {
+                        let days = t.elapsed().map(|d| d.as_secs() / 86_400).unwrap_or(0);
+                        match days {
+                            0 => tr!("aggiornato oggi", "updated today").to_string(),
+                            1 => tr!("aggiornato ieri", "updated yesterday").to_string(),
+                            n => tr!(
+                                format!("aggiornato {n} giorni fa"),
+                                format!("updated {n} days ago")
+                            ),
+                        }
+                    }
+                    None => tr!("non impostato", "not set").to_string(),
+                };
+                ui.label(
+                    RichText::new(status)
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                if self.login_busy == Some(site.key) {
+                    ui.spinner();
+                } else if ui
+                    .add_enabled(
+                        can,
+                        egui::Button::new(tr!("Aggiorna l'accesso", "Update sign-in")).small(),
+                    )
+                    .clicked()
+                {
+                    refresh = Some(site);
+                }
+                if logins::updated(&dir, site).is_some()
+                    && ui
+                        .small_button(tr!("Togli", "Remove"))
+                        .on_hover_text(tr!(
+                            "Cancella i cookie salvati di questo sito",
+                            "Delete this site's saved cookies"
+                        ))
+                        .clicked()
+                {
+                    logins::forget(&dir, site);
+                    self.login_notice = None;
+                }
+            });
+        }
+        if let Some((text, err)) = &self.login_notice {
+            ui.label(
+                RichText::new(text)
+                    .small()
+                    .color(if *err { ERR } else { OK }),
+            );
+        }
+        if let Some(site) = refresh {
+            self.login_busy = Some(site.key);
+            self.login_notice = None;
+            let (browser, tools) = (self.cfg.login_browser.clone(), self.toolset());
+            let send = self.sender(ctx);
+            thread::spawn(move || {
+                let result = logins::refresh(site, &browser, &tools, &logins::cookie_dir())
+                    .map_err(|e| format!("{e:#}"));
+                send(Msg::LoginDone {
+                    site: site.key,
+                    result,
+                });
+            });
+        }
     }
 
     /// «Scegli i brani…»: apre o chiude l'elenco; la prima volta lo chiede a yt-dlp.

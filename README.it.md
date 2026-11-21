@@ -32,7 +32,10 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
 - **Scegli i brani** di un album prima di scaricarlo, con le caselle.
 - **Video da ogni sito** che yt-dlp conosce (YouTube, Facebook, RaiPlay…), nella cartella Filmati
   in una cartella per sito e programma o canale; **sottotitoli e trascrizione** (.srt dentro il video
-  e accanto, più un .txt pulito); **nome del file** a scelta per un singolo link. MP3, M4A, FLAC, WAV e OGG (Opus no).
+  e accanto, più un .txt pulito); **nome del file** a scelta per un singolo link.
+- **Accesso ai siti** (Facebook, Instagram, RaiPlay): i cookie di un solo sito, copiati una volta
+  dal browser e usati solo per i suoi link; messaggi chiari per DRM, accesso richiesto e blocco per
+  paese; **RaiPlay Sound** (radio e podcast) in audio, nella cartella «Podcast». MP3, M4A, FLAC, WAV e OGG (Opus no).
 - **Più download insieme** (di serie 3, da 1 a 4 nelle opzioni avanzate): un album si divide nei
   suoi brani, scaricati in parallelo, con il numero del brano anche nei metadati.
 - **Playlist**: i file vanno in una cartella con il nome della playlist e si chiamano

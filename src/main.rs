@@ -6,6 +6,7 @@ mod app;
 mod config;
 mod downloader;
 mod i18n;
+mod logins;
 mod net;
 mod player;
 mod search;
