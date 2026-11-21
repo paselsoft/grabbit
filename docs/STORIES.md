@@ -247,6 +247,7 @@ Come utente, nella scheda «File» incollo uno o più indirizzi http(s) di file 
 connessioni, in code che posso avviare, fermare, rinominare e pianificare, con pausa e ripresa.
 Accettazione:
 - [unit] I 16 test del download manager di Dropall: nome del file, ripresa dal punto raggiunto, segmenti, code, pianificazione, limite condiviso.
+- [unit] Un server che accetta 2 connessioni e risponde 429 alle altre (come ftp.crifo.org): il file arriva intero, senza «Riprova».
 - [snap] Scheda con indirizzi, «Salva in», coda, connessioni; riga con barra, velocità, tempo rimasto, «Pausa», «Apri cartella».
 - [snap] Stato di errore con «Riprova».
 - [manual] Sul Mac, un file grande: pausa, chiusura di Grabbit, riapertura e ripresa.

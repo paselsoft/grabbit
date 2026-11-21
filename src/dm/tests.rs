@@ -24,6 +24,8 @@ struct Cfg {
     /// byte al secondo per ogni connessione (0 = nessun limite)
     per_conn_bps: u64,
     disposition: Option<&'static str>,
+    /// connessioni a intervalli accettate insieme; oltre risponde 429 (0 = nessun limite)
+    max_conns: usize,
 }
 
 fn body(len: usize) -> Arc<Vec<u8>> {
@@ -99,6 +101,18 @@ fn handle(
         return Ok(());
     }
     let total = cfg.body.len() as u64;
+    // come ftp.crifo.org: oltre un certo numero di connessioni insieme risponde 429
+    let counted = cfg.max_conns > 0 && matches!(range, Some((_, b)) if b > 0);
+    if counted {
+        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+        if now > cfg.max_conns {
+            active.fetch_sub(1, Ordering::SeqCst);
+            out.write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )?;
+            return Ok(());
+        }
+    }
     let (status, a, b) = match (cfg.ranges, range) {
         (true, Some((a, b))) => ("206 Partial Content", a, b.min(total - 1)),
         _ => ("200 OK", 0, total - 1),
@@ -119,7 +133,11 @@ fn handle(
     head.push_str("\r\n");
     out.write_all(head.as_bytes())?;
 
-    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+    let now = if counted {
+        active.load(Ordering::SeqCst)
+    } else {
+        active.fetch_add(1, Ordering::SeqCst) + 1
+    };
     max_active.fetch_max(now, Ordering::SeqCst);
     let mut res = Ok(());
     // il probe (0-0) non conta come connessione di download
@@ -189,6 +207,7 @@ fn multi_connection_download_is_correct_and_parallel() {
         ranges: true,
         per_conn_bps: 4 * 1024 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("multi");
     let m = manager();
@@ -214,6 +233,38 @@ fn multi_connection_download_is_correct_and_parallel() {
 }
 
 #[test]
+fn server_that_limits_connections_still_completes() {
+    // 8 connessioni chieste, il server ne accetta 2 e alle altre risponde 429:
+    // le connessioni in più lasciano il loro pezzo alle altre, il file arriva intero
+    let data = body(3 * 1024 * 1024 + 7);
+    let srv = serve(Cfg {
+        body: data.clone(),
+        ranges: true,
+        per_conn_bps: 512 * 1024,
+        disposition: None,
+        max_conns: 2,
+    });
+    let dir = temp_dir("busy");
+    let m = manager();
+    let q = queue_id(&m);
+    assert_eq!(m.add(&format!("{}/iso.bin", srv.base), &dir, q, 8), 1);
+    m.start_queue(q);
+    let s = wait_for(&m, "download completo nonostante i 429", 60, |s| {
+        all_done(s) || s.items.iter().any(|i| i.state == State::Failed)
+    });
+    assert_eq!(
+        s.items[0].state,
+        State::Done,
+        "errore: {:?}",
+        s.items[0].error
+    );
+    let path = s.items[0].final_path.clone().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), *data, "contenuto diverso");
+    assert!(srv.max_active.load(Ordering::SeqCst) <= 2);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn more_connections_are_faster() {
     // ogni connessione è limitata a 1 MiB/s: con 4 connessioni si va ~4 volte più veloci
     let data = body(2 * 1024 * 1024);
@@ -223,6 +274,7 @@ fn more_connections_are_faster() {
             ranges: true,
             per_conn_bps: 1024 * 1024,
             disposition: None,
+            max_conns: 0,
         });
         let dir = temp_dir(name);
         let m = manager();
@@ -260,6 +312,7 @@ fn server_without_ranges_falls_back_to_single_connection() {
         ranges: false,
         per_conn_bps: 0,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("noranges");
     let m = manager();
@@ -284,6 +337,7 @@ fn speed_limit_is_respected() {
         ranges: true,
         per_conn_bps: 0,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("limit");
     let m = manager();
@@ -312,6 +366,7 @@ fn limit_can_be_changed_while_downloading() {
         ranges: true,
         per_conn_bps: 0,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("limit2");
     let m = manager();
@@ -337,6 +392,7 @@ fn pause_and_resume_does_not_restart_from_zero() {
         ranges: true,
         per_conn_bps: 512 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("pause");
     let m = manager();
@@ -378,6 +434,7 @@ fn state_survives_restart_and_resumes() {
         ranges: true,
         per_conn_bps: 512 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("restart");
     let state = dir.join("downloads.json");
@@ -414,6 +471,7 @@ fn queue_downloads_files_one_after_the_other() {
         ranges: true,
         per_conn_bps: 1024 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("seq");
     let m = manager();
@@ -454,6 +512,7 @@ fn stopping_a_queue_puts_the_file_back_in_queue() {
         ranges: true,
         per_conn_bps: 512 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("stopq");
     let m = manager();
@@ -478,6 +537,7 @@ fn scheduler_starts_and_stops_the_queue() {
         ranges: true,
         per_conn_bps: 512 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("sched");
     let m = manager();
@@ -566,6 +626,7 @@ fn http_error_marks_the_item_failed_and_queue_continues() {
         ranges: true,
         per_conn_bps: 0,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("fail");
     let m = manager();
@@ -606,6 +667,7 @@ fn file_name_from_content_disposition_and_unique_names() {
         ranges: true,
         per_conn_bps: 0,
         disposition: Some("attachment; filename=\"Report finale.pdf\""),
+        max_conns: 0,
     });
     let dir = temp_dir("names");
     let m = manager();
@@ -633,6 +695,7 @@ fn removing_an_item_deletes_partial_file() {
         ranges: true,
         per_conn_bps: 512 * 1024,
         disposition: None,
+        max_conns: 0,
     });
     let dir = temp_dir("remove");
     let m = manager();

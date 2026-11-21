@@ -29,6 +29,8 @@ const MIN_CHUNK: u64 = 512 * 1024;
 const MAX_CHUNK: u64 = 64 * 1024 * 1024;
 const READ_BUF: usize = 32 * 1024;
 const MAX_RETRIES: u32 = 6;
+/// pausa base tra due tentativi (nei test più corta, come un pezzo grande rispetto ai tentativi)
+const RETRY_BASE_MS: u64 = if cfg!(test) { 20 } else { 400 };
 
 // ───────────────────────────── dati ─────────────────────────────
 
@@ -232,6 +234,16 @@ struct Run {
     segs: OnceLock<Vec<SegRt>>,
     next: AtomicUsize,
     stream_pos: AtomicU64,
+    /// connessioni a intervalli ancora al lavoro e pezzi lasciati da quelle chiuse
+    sched: Mutex<Sched>,
+}
+
+/// Quando il server rifiuta connessioni in più (429, 503), quelle connessioni lasciano il
+/// loro pezzo alle altre e si chiudono; l'ultima rimasta aspetta e riprova.
+#[derive(Default)]
+struct Sched {
+    workers: usize,
+    spare: Vec<usize>,
 }
 
 impl Run {
@@ -245,6 +257,38 @@ impl Run {
             *e = Some(msg);
         }
         self.failed.store(true, Ordering::Relaxed);
+    }
+
+    fn sched(&self) -> MutexGuard<'_, Sched> {
+        self.sched.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Prossimo pezzo da scaricare (prima quelli lasciati da altre connessioni), oppure
+    /// None: allora la connessione ha finito e non conta più.
+    fn next_segment(&self, n: usize) -> Option<usize> {
+        let mut sc = self.sched();
+        if let Some(i) = sc.spare.pop() {
+            return Some(i);
+        }
+        let i = self.next.fetch_add(1, Ordering::SeqCst);
+        if i < n {
+            return Some(i);
+        }
+        sc.workers = sc.workers.saturating_sub(1);
+        None
+    }
+
+    /// Il server rifiuta questa connessione: se ce ne sono altre al lavoro le lascia il pezzo
+    /// `i` e si chiude (true); se è l'ultima resta e riprova (false).
+    fn give_up_segment(&self, i: usize) -> bool {
+        let mut sc = self.sched();
+        if sc.workers > 1 {
+            sc.workers -= 1;
+            sc.spare.push(i);
+            true
+        } else {
+            false
+        }
     }
 
     fn downloaded(&self) -> u64 {
@@ -942,6 +986,7 @@ fn download_item(sh: &Arc<Shared>, mut item: Item, run: &Arc<Run>) -> Result<Out
         let _ = run.segs.set(rts);
         let n_workers = (item.conns.clamp(1, MAX_CONNECTIONS) as usize).min(item.segs.len().max(1));
         let active = AtomicUsize::new(n_workers);
+        run.sched().workers = n_workers;
         let ctx = Ctx {
             agent: &agent,
             url: &item.url,
@@ -1083,7 +1128,18 @@ struct Ctx<'a> {
 enum FetchErr {
     Fatal(anyhow::Error),
     Retry(anyhow::Error),
+    /// il server è occupato o non vuole altre connessioni (429, 503); attesa che chiede
+    Busy(anyhow::Error, Option<Duration>),
 }
+
+/// Il pezzo è finito (o il download fermato), oppure la connessione lo lascia alle altre.
+enum SegEnd {
+    Done,
+    GaveUp,
+}
+
+/// Tentativi dell'ultima connessione quando il server è occupato (circa 10 minuti in tutto).
+const BUSY_RETRIES: u32 = 12;
 
 fn segment_worker(ctx: &Ctx) {
     let Some(segs) = ctx.run.segs.get() else {
@@ -1093,28 +1149,58 @@ fn segment_worker(ctx: &Ctx) {
         if ctx.run.should_stop() {
             return;
         }
-        let i = ctx.run.next.fetch_add(1, Ordering::SeqCst);
-        let Some(seg) = segs.get(i) else { return };
-        if let Err(e) = fetch_segment(ctx, seg) {
-            ctx.run.fail(format!("{e:#}"));
+        let Some(i) = ctx.run.next_segment(segs.len()) else {
             return;
+        };
+        match fetch_segment(ctx, &segs[i], i) {
+            Ok(SegEnd::Done) => {}
+            Ok(SegEnd::GaveUp) => return,
+            Err(e) => {
+                ctx.run.fail(format!("{e:#}"));
+                return;
+            }
         }
     }
 }
 
-fn fetch_segment(ctx: &Ctx, seg: &SegRt) -> Result<()> {
+fn fetch_segment(ctx: &Ctx, seg: &SegRt, i: usize) -> Result<SegEnd> {
     let mut attempts = 0u32;
+    let mut busy = 0u32;
     loop {
         if ctx.run.should_stop() {
-            return Ok(());
+            return Ok(SegEnd::Done);
         }
         let before = seg.pos.load(Ordering::Relaxed);
         if before > seg.end {
-            return Ok(());
+            return Ok(SegEnd::Done);
         }
         let err = match fetch_range(ctx, seg) {
             Ok(()) if seg.pos.load(Ordering::Relaxed) > seg.end || ctx.run.should_stop() => {
-                return Ok(())
+                return Ok(SegEnd::Done)
+            }
+            Err(FetchErr::Busy(e, retry_after)) => {
+                if ctx.run.give_up_segment(i) {
+                    return Ok(SegEnd::GaveUp);
+                }
+                // è l'ultima connessione: aspetta quanto chiede il server (o sempre di più)
+                if seg.pos.load(Ordering::Relaxed) > before {
+                    busy = 0;
+                }
+                busy += 1;
+                if busy > BUSY_RETRIES {
+                    return Err(e.context(tr!(
+                        "il server è occupato e non accetta il download, riprova più tardi",
+                        "the server is busy and does not accept the download, try again later"
+                    )));
+                }
+                let base = if cfg!(test) { 50 } else { 2000 };
+                let backoff = Duration::from_millis((base << busy.min(5)).min(60_000));
+                let wait = retry_after.unwrap_or(backoff).min(Duration::from_secs(120));
+                let t0 = Instant::now();
+                while t0.elapsed() < wait && !ctx.run.should_stop() {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                continue;
             }
             Ok(()) => anyhow!(tr!(
                 "il server ha chiuso la connessione prima della fine",
@@ -1131,7 +1217,7 @@ fn fetch_segment(ctx: &Ctx, seg: &SegRt) -> Result<()> {
             return Err(err);
         }
         // pausa crescente, interrompibile
-        let wait = Duration::from_millis(400 * attempts as u64);
+        let wait = Duration::from_millis(RETRY_BASE_MS * attempts as u64);
         let t0 = Instant::now();
         while t0.elapsed() < wait && !ctx.run.should_stop() {
             thread::sleep(Duration::from_millis(50));
@@ -1161,7 +1247,15 @@ fn fetch_range(ctx: &Ctx, seg: &SegRt) -> std::result::Result<(), FetchErr> {
             format!("il server ha risposto {status} a una richiesta a intervalli"),
             format!("the server replied {status} to a range request")
         ));
-        return Err(if status >= 500 || status == 408 || status == 429 {
+        return Err(if status == 429 || status == 503 {
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            FetchErr::Busy(e, retry_after)
+        } else if status >= 500 || status == 408 {
             FetchErr::Retry(e)
         } else {
             FetchErr::Fatal(e)
