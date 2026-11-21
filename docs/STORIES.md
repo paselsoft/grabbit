@@ -236,3 +236,28 @@ Accettazione:
 - [unit] Un link RaiPlay Sound è audio, nella cartella della musica, in «Podcast/<programma>/Titolo».
 - [manual] Sul Mac, una puntata di un programma RaiPlay Sound.
 Stato: fatta
+
+## Milestone 8: scheda File e limite di velocità (0.10.0)
+
+Dal piano `docs/PIANO-DROPALL.md`, sezione 7 (file normali: sì; torrent: dopo una prova su High Sierra;
+icona nella barra dei menu e nel Dock: in una versione successiva). S-022, S-023
+
+### S-022 Scheda «File»: download manager
+Come utente, nella scheda «File» incollo uno o più indirizzi http(s) di file e Grabbit li scarica con più
+connessioni, in code che posso avviare, fermare, rinominare e pianificare, con pausa e ripresa.
+Accettazione:
+- [unit] I 16 test del download manager di Dropall: nome del file, ripresa dal punto raggiunto, segmenti, code, pianificazione, limite condiviso.
+- [unit] Un server che accetta 2 connessioni e risponde 429 alle altre (come ftp.crifo.org): il file arriva intero, senza «Riprova».
+- [snap] Scheda con indirizzi, «Salva in», coda, connessioni; riga con barra, velocità, tempo rimasto, «Pausa», «Apri cartella».
+- [snap] Stato di errore con «Riprova».
+- [manual] Sul Mac, un file grande: pausa, chiusura di Grabbit, riapertura e ripresa.
+Stato: fatta
+
+### S-023 Limite di velocità per tutti i download
+Come utente, imposto un limite in KB/s che vale per i file e anche per video e musica, così gli altri
+in casa possono usare la rete.
+Accettazione:
+- [unit] yt-dlp riceve `--limit-rate`, diviso tra i download che vanno insieme; niente limite se spento.
+- [snap] Con 1024 KB/s un file si scarica a circa 1020 KB/s.
+- [manual] Sul Mac, un video con il limite acceso.
+Stato: fatta

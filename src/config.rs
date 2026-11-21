@@ -70,6 +70,12 @@ pub struct Config {
     pub sub_langs: String,
     /// browser da cui «Accesso ai siti» copia i cookie
     pub login_browser: String,
+    /// scheda «File»: cartella dove salvare i file scaricati
+    pub dm_dir: PathBuf,
+    /// scheda «File»: connessioni per file (1–16)
+    pub dm_connections: u8,
+    /// limite di velocità in KB/s per tutti i download (0 = nessun limite)
+    pub speed_limit_kbps: u32,
 }
 
 impl Default for Config {
@@ -87,6 +93,9 @@ impl Default for Config {
             .unwrap_or_else(|| out_dir.clone());
         Self {
             mode: Mode::Video,
+            dm_dir: out_dir.clone(),
+            dm_connections: 8,
+            speed_limit_kbps: 0,
             out_dir,
             video_dir,
             site_folders: true,

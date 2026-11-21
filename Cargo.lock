@@ -1481,6 +1481,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "chrono",
  "directories",
  "eframe",
  "image",

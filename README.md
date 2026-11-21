@@ -52,6 +52,10 @@ The interface is in Italian if your system language is Italian, and in English o
   "Add".
 - **Download bar** always visible at the bottom: **Download** with the number of links, or
   **Cancel** with the overall progress; a track-by-track list with live progress.
+- **Files tab**: a download manager for regular files (http and https), with multiple
+  connections, queues you can start, stop and schedule, pause and resume even after closing.
+- **Speed limit** in KB/s for all downloads, files, videos and music, so the network stays
+  usable for others.
 - **Sets itself up**: on first launch it downloads yt-dlp, ffmpeg and Deno
   (the JavaScript runtime yt-dlp needs for YouTube); on every launch it checks
   whether a newer yt-dlp exists and updates it.
@@ -192,6 +196,7 @@ To force the interface language (for testing): `GRABBIT_LANG=it` or `GRABBIT_LAN
 | `src/tools.rs` | downloads/updates yt-dlp, Deno, ffmpeg |
 | `src/spotify.rs` | reads title/artist from Spotify links |
 | `src/selfupdate.rs` | automatic app updates |
+| `src/dm.rs`, `src/app/dm_tab.rs` | Files tab: download manager (adapted from Dropall) |
 | `src/config.rs` | saved settings |
 | `src/i18n.rs` | interface language (Italian / English) |
 
@@ -216,3 +221,6 @@ Grabbit is free software, released under the
 [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html)
 (`GPL-3.0-or-later`); see `LICENSE`. You may use, study, share and modify it; if you
 distribute modified versions, they must be released under the same license with their source code.
+
+The download manager in the Files tab (`src/dm.rs`, `src/app/dm_tab.rs`) is adapted from
+[Dropall](https://github.com/marcogiannini/dropall) by Marco Giannini, under the same license.

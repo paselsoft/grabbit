@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod dm;
 mod downloader;
 mod i18n;
 mod logins;
@@ -57,6 +58,9 @@ mod tests {
         const MISSING: &[char] = &['→', '←', '✓', '✔', '⏸', '⏮', '⏭', '▶', '♫'];
         for (name, src) in [
             ("app.rs", include_str!("app.rs")),
+            ("app/dm_tab.rs", include_str!("app/dm_tab.rs")),
+            ("dm.rs", include_str!("dm.rs")),
+            ("logins.rs", include_str!("logins.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
             ("player.rs", include_str!("player.rs")),
             ("search.rs", include_str!("search.rs")),
