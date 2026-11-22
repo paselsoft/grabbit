@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod credits;
 mod dm_tab;
 mod menubar_glue;
 mod torrent_tab;
@@ -88,6 +89,12 @@ enum Msg {
     Folder(PathBuf, Mode),
     /// cartella della musica scelta per «Ascolta»
     PlayerDir(PathBuf),
+    /// a che punto è la lettura della cartella della musica: brani letti su totale
+    ScanProgress {
+        seq: u64,
+        done: usize,
+        total: usize,
+    },
     /// libreria musicale letta (`seq` scarta le letture superate)
     Library {
         seq: u64,
@@ -277,6 +284,12 @@ pub struct App {
     /// «Accesso ai siti»: sito in aggiornamento ed esito dell'ultimo aggiornamento
     login_busy: Option<&'static str>,
     login_notice: Option<(String, bool)>,
+    /// mini player: dimensioni della finestra intera da rimettere (None = finestra intera)
+    mini: Option<egui::Vec2>,
+    /// finestra «Licenze e crediti» aperta
+    show_credits: bool,
+    /// «Esci da Grabbit»: la chiusura non va trattenuta nella barra dei menu
+    quitting: bool,
     /// scheda «File»: download manager dei file (code, pianificazione, limite)
     dm: crate::dm::Manager,
     dm_ui: dm_tab::DmUi,
@@ -338,6 +351,9 @@ impl App {
             clip_offer: None,
             login_busy: None,
             login_notice: None,
+            mini: None,
+            show_credits: false,
+            quitting: false,
             dm: {
                 let ctx = cc.egui_ctx.clone();
                 let state = tools::project_dirs().map(|d| d.config_dir().join("downloads.json"));
@@ -908,6 +924,11 @@ impl App {
                 self.listen.open = None;
                 self.start_scan(ctx);
             }
+            Msg::ScanProgress { seq, done, total } => {
+                if seq == self.listen.seq {
+                    self.listen.progress = Some((done, total));
+                }
+            }
             Msg::Library { seq, library } => {
                 if seq == self.listen.seq {
                     self.library_arrived(ctx, library);
@@ -1053,6 +1074,7 @@ impl eframe::App for App {
         self.update_title(ctx);
         self.check_clipboard(ctx);
         self.menubar_tick(ctx);
+        self.keep_in_background(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1062,7 +1084,27 @@ impl eframe::App for App {
         self.torrent_watch
             .store(self.tab == Tab::Files, Ordering::Relaxed);
         // il brano in ascolto resta in basso in tutte e due le schede
-        self.now_playing_bar(ui);
+        let bar = self.now_playing_bar(ui);
+        if let Some((_, true)) = bar {
+            let on = self.mini.is_none();
+            self.set_mini(ctx, on);
+        }
+        if self.mini.is_some() {
+            match bar {
+                // niente più in ascolto: torna la finestra intera
+                None => self.set_mini(ctx, false),
+                // la finestra è alta quanto la barra
+                Some((h, _)) => {
+                    let size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+                    if let Some(size) = size.filter(|s| (s.y - h).abs() > 1.5) {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                            size.x, h,
+                        )));
+                    }
+                    return;
+                }
+            }
+        }
         // «Scarica» e l'avanzamento restano visibili senza scorrere (sopra il player)
         if self.tab == Tab::Download {
             self.download_bar(ui, ctx);
@@ -1112,6 +1154,7 @@ impl eframe::App for App {
                     self.footer(ui);
                 });
         });
+        self.credits_window(ctx);
     }
 }
 
@@ -2181,6 +2224,14 @@ impl App {
                         "A track already downloaded in the same format is not downloaded again, as long as the file exists."
                     ));
                 ui.checkbox(&mut self.cfg.auto_update_app, tr!("Installa automaticamente gli aggiornamenti di Grabbit", "Install Grabbit updates automatically"));
+                if cfg!(target_os = "macos")
+                    && ui
+                        .checkbox(&mut self.cfg.stay_in_menubar, tr!("Chiudendo la finestra resta nella barra dei menu", "Stay in the menu bar when the window is closed"))
+                        .on_hover_text(tr!("I download continuano; per uscire usa «Esci da Grabbit» nel menu o Cmd+Q.", "Downloads keep going; to quit use “Quit Grabbit” in the menu or Cmd+Q."))
+                        .changed()
+                {
+                    self.cfg.save();
+                }
                 ui.horizontal(|ui| {
                     let can_check = !self.update_checking && !matches!(self.update, UpdateUi::Working(_));
                     if ui.add_enabled(can_check, egui::Button::new(tr!("Controlla aggiornamenti di Grabbit", "Check for Grabbit updates"))).clicked() {
@@ -2685,7 +2736,7 @@ impl App {
         out
     }
 
-    fn footer(&self, ui: &mut egui::Ui) {
+    fn footer(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let yt = self.tools.ytdlp.as_deref().unwrap_or("…");
         let ok = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
@@ -2713,6 +2764,12 @@ impl App {
                 .small()
                 .color(ui.visuals().weak_text_color()),
         );
+        if ui
+            .small_button(tr!("Licenze e crediti", "Licenses and credits"))
+            .clicked()
+        {
+            self.show_credits = true;
+        }
     }
 }
 
@@ -2730,6 +2787,8 @@ enum Tab {
 struct ListenUi {
     library: Option<player::Library>,
     busy: bool,
+    /// lettura della cartella in corso: brani letti, totale
+    progress: Option<(usize, usize)>,
     seq: u64,
     cancel: Arc<AtomicBool>,
     /// la cartella è cambiata dall'ultima lettura (nuovi download): va riletta
@@ -2877,12 +2936,17 @@ impl App {
         self.listen.seq += 1;
         self.listen.busy = true;
         self.listen.stale = false;
+        self.listen.progress = None;
         let seq = self.listen.seq;
         let dir = self.listen_dir();
         let px = (COVER_LIST * ctx.pixels_per_point().max(1.0)).round() as u32 * 2;
         let send = self.sender(ctx);
         thread::spawn(move || {
-            let library = player::scan(&dir, px, &cancel);
+            let cache = tools::data_dir().join("library-cache");
+            let tell = send.clone();
+            let library = player::scan_cached(&dir, px, &cancel, Some(&cache), &|done, total| {
+                tell(Msg::ScanProgress { seq, done, total })
+            });
             send(Msg::Library { seq, library });
         });
     }
@@ -3329,8 +3393,21 @@ impl App {
             if self.listen.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(tr!("Leggo la cartella…", "Reading the folder…"));
+                    match self.listen.progress {
+                        Some((done, total)) if total > 0 => ui.label(tr!(
+                            format!("Leggo la cartella… {done} di {total} brani"),
+                            format!("Reading the folder… {done} of {total} tracks")
+                        )),
+                        // prima fase: si contano i brani
+                        _ => ui.label(tr!(
+                            "Leggo la cartella… conto i brani",
+                            "Reading the folder… counting the tracks"
+                        )),
+                    };
                 });
+                if let Some((done, total)) = self.listen.progress.filter(|p| p.1 > 0) {
+                    progress_row(ui, done as f32 / total as f32);
+                }
             }
             let Some(lib) = &self.listen.library else {
                 return;
@@ -3428,7 +3505,8 @@ impl App {
                                 .size(16.0),
                         )
                         .id_salt(("artist", &key.1, key.0))
-                        .default_open(true);
+                        // di serie si vedono solo gli artisti: gli album si aprono con la freccia
+                        .default_open(false);
                         // mentre si cerca, i gruppi trovati restano aperti
                         let header = if needle.is_empty() {
                             header
@@ -3903,13 +3981,12 @@ impl App {
     }
 
     /// Barra in basso con il brano in ascolto: comandi, posizione e volume.
-    fn now_playing_bar(&mut self, ui: &mut egui::Ui) {
-        let Some((ai, _)) = self.listen.now else {
-            return;
-        };
-        let Some(track) = self.now_track().cloned() else {
-            return;
-        };
+    /// Barra del brano in ascolto; torna (altezza, «mini player» premuto) se è visibile.
+    fn now_playing_bar(&mut self, ui: &mut egui::Ui) -> Option<(f32, bool)> {
+        let (ai, _) = self.listen.now?;
+        let track = self.now_track().cloned()?;
+        let mut toggle_mini = false;
+        let mini = self.mini.is_some();
         let album = self
             .listen
             .library
@@ -3921,7 +3998,7 @@ impl App {
         let mut action: Option<Icon> = None;
         let mut toggle_shuffle = false;
         let mut cycle_repeat = false;
-        egui::Panel::bottom("now_playing")
+        let bar = egui::Panel::bottom("now_playing")
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(28, 28, 31))
@@ -4000,8 +4077,8 @@ impl App {
                         }
                     });
                     ui.vertical(|ui| {
-                        // a destra restano volume e percentuale
-                        ui.set_max_width((ui.available_width() - 230.0).max(80.0));
+                        // a destra restano volume, percentuale e il pulsante del mini player
+                        ui.set_max_width((ui.available_width() - 330.0).max(80.0));
                         ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
                         let who = if track.artist.is_empty() {
                             album.1.clone()
@@ -4023,6 +4100,27 @@ impl App {
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (text, hover) = if mini {
+                            (
+                                tr!("Mostra tutto", "Show all"),
+                                tr!(
+                                    "Torna alla finestra intera di Grabbit",
+                                    "Back to the full Grabbit window"
+                                ),
+                            )
+                        } else {
+                            (
+                                tr!("Mini player", "Mini player"),
+                                tr!(
+                                    "Riduce la finestra al solo player",
+                                    "Shrinks the window to just the player"
+                                ),
+                            )
+                        };
+                        if ui.small_button(text).on_hover_text(hover).clicked() {
+                            toggle_mini = true;
+                        }
+                        ui.add_space(6.0);
                         ui.spacing_mut().slider_width = 90.0;
                         // percentuale a destra del cursore, larga fissa: «100%» non sposta nulla
                         let pct = format!("{:.0}%", self.cfg.volume.clamp(0.0, 1.0) * 100.0);
@@ -4102,6 +4200,22 @@ impl App {
                 Repeat::One => Repeat::Off,
             };
             self.cfg.save();
+        }
+        Some((bar.response.rect.height(), toggle_mini))
+    }
+
+    /// Mini player: la finestra si riduce alla sola barra del player (e torna com'era).
+    fn set_mini(&mut self, ctx: &egui::Context, on: bool) {
+        const FULL_MIN: egui::Vec2 = egui::vec2(640.0, 560.0);
+        if on {
+            let size = ctx
+                .input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                .unwrap_or(egui::vec2(780.0, 780.0));
+            self.mini = Some(size);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(560.0, 80.0)));
+        } else if let Some(size) = self.mini.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(FULL_MIN));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.max(FULL_MIN)));
         }
     }
 }

@@ -324,3 +324,57 @@ Accettazione:
 - [unit] I link si dividono in video e musica, torrent, file diretti; le ricerche restano a yt-dlp.
 - [snap] Magnet incollato in «Scarica»: si apre «File» con «Aggiunto a Transmission: <nome>».
 Stato: fatta
+
+## Milestone 12: ascolto più comodo, licenze, Grabbit in secondo piano (0.14.0)
+
+S-029, S-030, S-031, S-032
+
+### S-029 Artisti chiusi in «Ascolta»
+Come utente con una libreria grande, in «Ascolta» vedo l'elenco degli artisti chiusi e apro con la
+freccia solo quello che mi interessa; mentre cerco, i gruppi trovati restano aperti.
+Accettazione:
+- [snap] Dopo la lettura della cartella si vedono solo «Artista · N uscite»; la freccia apre gli album.
+Stato: fatta
+
+### S-030 Mini player
+Come utente che ascolta musica, con «Mini player» la finestra si riduce alla sola barra del player;
+con «Mostra tutto» torna com'era.
+Accettazione:
+- [snap] La finestra diventa alta quanto la barra, con «Mostra tutto»; poi torna alla grandezza di prima.
+- [snap] Se non c'è più niente in ascolto, torna da sola la finestra intera.
+Stato: fatta
+
+### S-031 Licenze e crediti
+Come utente, da «Licenze e crediti» in fondo alla finestra vedo la licenza di Grabbit, i crediti
+(Dropall), i programmi che Grabbit scarica (yt-dlp, FFmpeg, Deno, QuickJS) e le licenze di tutte le
+librerie incluse.
+Accettazione:
+- [unit] Ogni libreria di Cargo.lock è in `assets/licenses.txt` (generato da `scripts/licenses.py`).
+- [snap] Finestra con le sezioni, i link e l'elenco per licenza; «Chiudi» o Esc la chiudono.
+Stato: fatta
+
+### S-032 Grabbit in secondo piano a finestra chiusa (Mac)
+Come utente del Mac, chiudendo la finestra Grabbit resta nella barra dei menu e i download continuano;
+la riapro da «Apri Grabbit» o cliccando l'icona nel Dock, ed esco con «Esci da Grabbit» o Cmd+Q.
+Accettazione:
+- [ci] Compila per macOS (`applicationShouldHandleReopen:hasVisibleWindows:` aggiunto al delegato di winit).
+- [manual] Sul Mac: chiusura con il pallino rosso (notifica la prima volta), download che continua, riapertura dal menu e dal Dock, «Esci da Grabbit».
+- [manual] Opzioni avanzate › «Chiudendo la finestra resta nella barra dei menu» spenta: Grabbit si chiude come prima.
+Stato: fatta
+
+### S-033 Scansione incrementale della musica
+Come utente con molta musica, «Ascolta» non rilegge ogni volta tutti i brani: come un backup
+incrementale, Grabbit ricorda i dati di ogni file (con dimensione e data di modifica) e riapre solo i
+file nuovi o cambiati; le copertine già rimpicciolite restano in cache.
+Accettazione:
+- [unit] Seconda scansione senza file riaperti, stesso elenco e stessa copertina; un file cambiato si rilegge, uno cancellato sparisce.
+- [manual] Sul Mac, con la libreria vera: la seconda apertura di «Ascolta» è molto più veloce.
+Stato: fatta
+
+### S-034 Avanzamento della lettura della cartella
+Come utente, mentre «Ascolta» legge la cartella della musica vedo a che punto è: «Leggo la cartella…
+N di M brani» con la barra e la percentuale.
+Accettazione:
+- [unit] L'avanzamento parte da 0 e arriva al totale dei brani.
+- [snap] Durante la lettura: testo «20 di 200 brani» e barra al 10%.
+Stato: fatta

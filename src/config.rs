@@ -82,6 +82,10 @@ pub struct Config {
     pub qbittorrent_port: u16,
     /// app a cui vanno i nuovi magnet e .torrent
     pub torrent_app: crate::torrent::App,
+    /// Mac: chiudendo la finestra Grabbit resta nella barra dei menu (si esce da «Esci da Grabbit»)
+    pub stay_in_menubar: bool,
+    /// l'avviso «Grabbit resta nella barra dei menu» è già stato mostrato
+    pub told_menubar: bool,
 }
 
 impl Default for Config {
@@ -105,6 +109,8 @@ impl Default for Config {
             transmission_port: crate::torrent::DEFAULT_PORT,
             qbittorrent_port: crate::torrent::QBIT_PORT,
             torrent_app: Default::default(),
+            stay_in_menubar: true,
+            told_menubar: false,
             out_dir,
             video_dir,
             site_folders: true,

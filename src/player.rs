@@ -61,6 +61,126 @@ pub struct Library {
     pub albums: Vec<Album>,
     /// file audio trovati che il player non sa riprodurre (Opus, WebM)
     pub unsupported: usize,
+    /// brani letti davvero dal disco (gli altri vengono dalla cache della scansione)
+    pub fresh: usize,
+}
+
+/// Cache della scansione, come un backup incrementale: per ogni file i dati già letti, con
+/// dimensione e data di modifica. Un file uguale non si riapre; le copertine già rimpicciolite
+/// stanno in `covers/` come PNG.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ScanCache {
+    /// versione del formato: se cambia, la cache si ignora
+    v: u32,
+    files: std::collections::HashMap<PathBuf, CachedFile>,
+}
+
+const CACHE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct CachedFile {
+    size: u64,
+    /// data di modifica in nanosecondi dal 1970
+    mtime: u128,
+    title: String,
+    artist: String,
+    number: Option<u32>,
+    duration_ms: Option<u64>,
+    video: bool,
+    tag_artist: Option<String>,
+    album_artist: Option<String>,
+    year: Option<u32>,
+    has_cover: bool,
+}
+
+/// Dimensione e data di modifica di un file (None se non si leggono).
+fn stamp(path: &Path) -> Option<(u64, u128)> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((m.len(), t))
+}
+
+impl CachedFile {
+    fn new(stamp: (u64, u128), track: &Track, tags: &Tags) -> Self {
+        CachedFile {
+            size: stamp.0,
+            mtime: stamp.1,
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            number: track.number,
+            duration_ms: track.duration.map(|d| d.as_millis() as u64),
+            video: track.video,
+            tag_artist: tags.artist.clone(),
+            album_artist: tags.album_artist.clone(),
+            year: tags.year,
+            has_cover: tags.cover.is_some(),
+        }
+    }
+
+    fn restore(&self, path: &Path) -> (Track, Tags) {
+        let track = Track {
+            path: path.to_path_buf(),
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            number: self.number,
+            duration: self.duration_ms.map(Duration::from_millis),
+            video: self.video,
+        };
+        let tags = Tags {
+            artist: self.tag_artist.clone(),
+            year: self.year,
+            album_artist: self.album_artist.clone(),
+            cover: None,
+        };
+        (track, tags)
+    }
+}
+
+/// Nome stabile per la copertina in cache (FNV-1a: non cambia tra versioni di Rust).
+fn cover_key(path: &Path, stamp: (u64, u128), px: u32) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let text = format!("{}|{}|{}|{px}", path.display(), stamp.0, stamp.1);
+    for b in text.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}.png")
+}
+
+fn load_cache(dir: &Path) -> ScanCache {
+    std::fs::read(dir.join("library.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<ScanCache>(&b).ok())
+        .filter(|c| c.v == CACHE_VERSION)
+        .unwrap_or_default()
+}
+
+fn save_cache(dir: &Path, cache: &ScanCache) {
+    let _ = std::fs::create_dir_all(dir);
+    let tmp = dir.join("library.json.tmp");
+    if let Ok(b) = serde_json::to_vec(cache) {
+        if std::fs::write(&tmp, b).is_ok() {
+            let _ = std::fs::rename(&tmp, dir.join("library.json"));
+        }
+    }
+}
+
+/// Copertine in cache non più usate da nessun album: si tolgono.
+fn prune_covers(dir: &Path, used: &std::collections::HashSet<String>) {
+    let Ok(rd) = std::fs::read_dir(dir.join("covers")) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".png") && !used.contains(&name) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 fn ext_of(p: &Path) -> String {
@@ -72,8 +192,29 @@ fn ext_of(p: &Path) -> String {
 
 /// Esplora `root`: ogni cartella che contiene brani è un album (i brani direttamente in
 /// `root` formano l'album «Brani sciolti»). `cover_px` è il lato massimo delle copertine.
+#[cfg(test)]
 pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
+    scan_cached(root, cover_px, cancel, None, &|_, _| {})
+}
+
+/// Come `scan`, ma con la cache in `cache_dir`: si riaprono solo i file nuovi o cambiati.
+/// `progress(fatti, totale)` dice quanti brani sono stati letti (al più ogni 0,1%).
+pub fn scan_cached(
+    root: &Path,
+    cover_px: u32,
+    cancel: &AtomicBool,
+    cache_dir: Option<&Path>,
+    progress: &dyn Fn(usize, usize),
+) -> Library {
+    let old = cache_dir.map(load_cache).unwrap_or_default();
+    let mut new = ScanCache {
+        v: CACHE_VERSION,
+        files: Default::default(),
+    };
+    let mut used_covers = std::collections::HashSet::new();
     let mut lib = Library::default();
+    // 1) si elencano le cartelle e si contano i brani (veloce): serve per la percentuale
+    let mut found: Vec<(PathBuf, usize, Vec<PathBuf>)> = Vec::new();
     let mut dirs = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = dirs.pop() {
         if cancel.load(Ordering::Relaxed) {
@@ -105,8 +246,18 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
                 lib.unsupported += 1;
             }
         }
-        if files.is_empty() {
-            continue;
+        if !files.is_empty() {
+            found.push((dir, depth, files));
+        }
+    }
+    // 2) si leggono i brani (dalla cache quelli già visti), dicendo a che punto si è
+    let total: usize = found.iter().map(|f| f.2.len()).sum();
+    let mut done = 0usize;
+    let mut last_step = usize::MAX;
+    progress(0, total);
+    for (dir, depth, files) in found {
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
         let mut album = Album {
             loose: dir == root,
@@ -121,16 +272,50 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             ..Album::default()
         };
         let mut cover_bytes: Option<Vec<u8>> = None;
+        // il file da cui viene la copertina (il primo che ne ha una), per la cache
+        let mut cover_from: Option<(PathBuf, (u64, u128))> = None;
         let mut years = Vec::new();
         for f in files {
-            let (track, tags) = read_track(&f);
+            done += 1;
+            let step = done * 1000 / total.max(1);
+            if step != last_step {
+                last_step = step;
+                progress(done, total);
+            }
+            let st = stamp(&f);
+            let cached = st.and_then(|st| {
+                old.files
+                    .get(&f)
+                    .filter(|c| c.size == st.0 && c.mtime == st.1)
+            });
+            let (track, tags, has_cover) = match cached {
+                Some(c) => {
+                    let (t, g) = c.restore(&f);
+                    new.files.insert(f.clone(), c.clone());
+                    (t, g, c.has_cover)
+                }
+                None => {
+                    let (t, g) = read_track(&f);
+                    lib.fresh += 1;
+                    if let Some(st) = st {
+                        new.files.insert(f.clone(), CachedFile::new(st, &t, &g));
+                    }
+                    let has = g.cover.is_some();
+                    (t, g, has)
+                }
+            };
             if album.artist.is_empty() {
-                album.artist = tags.album_artist.or(tags.artist).unwrap_or_default();
+                album.artist = tags
+                    .album_artist
+                    .clone()
+                    .or(tags.artist.clone())
+                    .unwrap_or_default();
             }
             if let Some(y) = tags.year {
                 years.push(y);
             }
-            if cover_bytes.is_none() {
+            if cover_from.is_none() && has_cover {
+                cover_from = st.map(|st| (f.clone(), st));
                 cover_bytes = tags.cover;
             }
             album.tracks.push(track);
@@ -148,10 +333,37 @@ pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
             album.group = artist_dir.unwrap_or_else(|| primary_artist(&album.artist));
         }
         sort_tracks(&mut album.tracks);
-        album.cover = cover_bytes.and_then(|b| crate::search::decode_cover(&b, cover_px).ok());
+        album.cover = match (&cover_from, cache_dir) {
+            // copertina già rimpicciolita in cache: si carica il PNG
+            (Some((f, st)), Some(dir)) => {
+                let key = cover_key(f, *st, cover_px);
+                let png = dir.join("covers").join(&key);
+                used_covers.insert(key);
+                let cached = image::open(&png).ok().map(|i| {
+                    let i = i.to_rgba8();
+                    (i.width(), i.height(), i.into_raw())
+                });
+                cached.or_else(|| {
+                    // non c'è (o il file è cambiato): si legge e si salva per la prossima volta
+                    let bytes = cover_bytes.take().or_else(|| read_track(f).1.cover)?;
+                    let c = crate::search::decode_cover(&bytes, cover_px).ok()?;
+                    let _ = std::fs::create_dir_all(dir.join("covers"));
+                    if let Some(img) = image::RgbaImage::from_raw(c.0, c.1, c.2.clone()) {
+                        let _ = img.save(&png);
+                    }
+                    Some(c)
+                })
+            }
+            _ => cover_bytes.and_then(|b| crate::search::decode_cover(&b, cover_px).ok()),
+        };
         lib.albums.push(album);
     }
     sort_albums(&mut lib.albums);
+    // una scansione interrotta non deve buttare via la cache dei file non visti
+    if let Some(dir) = cache_dir.filter(|_| !cancel.load(Ordering::Relaxed)) {
+        save_cache(dir, &new);
+        prune_covers(dir, &used_covers);
+    }
     lib
 }
 
@@ -1007,6 +1219,7 @@ mod tests {
                 },
             ],
             unsupported: 0,
+            fresh: 0,
         };
         assert_eq!(lib.find_album("21", "Adele"), Some(0));
         assert_eq!(lib.find_album("21", "Altro artista"), None);
@@ -1127,5 +1340,101 @@ mod tests {
             .unwrap();
         assert_eq!(loose.tracks[0].title, "Sciolto");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// MP3 minimo (qualche fotogramma di silenzio) con una copertina PNG 4×4 rossa nell'ID3.
+    fn mp3_with_cover(path: &Path) {
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 30, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        // fotogramma APIC (ID3v2.3): codifica, tipo MIME, tipo immagine, descrizione, dati
+        let mut apic = vec![0u8];
+        apic.extend_from_slice(b"image/png\0");
+        apic.push(3);
+        apic.push(0);
+        apic.extend_from_slice(&png);
+        let mut frames = b"APIC".to_vec();
+        frames.extend_from_slice(&(apic.len() as u32).to_be_bytes());
+        frames.extend_from_slice(&[0, 0]);
+        frames.extend_from_slice(&apic);
+        let n = frames.len() as u32;
+        let syncsafe = [
+            ((n >> 21) & 0x7f) as u8,
+            ((n >> 14) & 0x7f) as u8,
+            ((n >> 7) & 0x7f) as u8,
+            (n & 0x7f) as u8,
+        ];
+        let mut b = b"ID3\x03\x00\x00".to_vec();
+        b.extend_from_slice(&syncsafe);
+        b.extend_from_slice(&frames);
+        // MPEG-1 Layer III, 128 kbit/s, 44,1 kHz: 417 byte a fotogramma, tutto silenzio
+        for _ in 0..20 {
+            b.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x64]);
+            b.extend_from_slice(&[0u8; 413]);
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// La seconda scansione non riapre i file (stesso risultato, copertina dalla cache);
+    /// un file cambiato si rilegge, uno cancellato sparisce.
+    #[test]
+    fn scan_is_incremental() {
+        let base = std::env::temp_dir().join(format!("grabbit-inc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, cache) = (base.join("Musica"), base.join("cache"));
+        let album = root.join("Adele").join("21");
+        std::fs::create_dir_all(&album).unwrap();
+        mp3_with_cover(&album.join("1 - Rolling.mp3"));
+        mp3_with_cover(&album.join("2 - Rumour.mp3"));
+        mp3_with_cover(&root.join("Sciolto.mp3"));
+        let no = AtomicBool::new(false);
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let first = scan_cached(&root, 32, &no, Some(&cache), &|d, t| {
+            seen.borrow_mut().push((d, t))
+        });
+        assert_eq!(first.fresh, 3);
+        // l'avanzamento parte da 0 e arriva a tutti i brani
+        let seen = seen.into_inner();
+        assert_eq!(seen.first(), Some(&(0, 3)));
+        assert_eq!(seen.last(), Some(&(3, 3)));
+        let cover = |l: &Library| {
+            l.albums
+                .iter()
+                .find(|a| a.name == "21")
+                .and_then(|a| a.cover.clone())
+        };
+        let c1 = cover(&first).expect("copertina letta dall'MP3");
+        assert_eq!(c1.2[..3], [200, 30, 30]);
+
+        let second = scan_cached(&root, 32, &no, Some(&cache), &|_, _| {});
+        assert_eq!(second.fresh, 0, "nessun file riaperto");
+        assert_eq!(cover(&second).unwrap(), c1, "copertina uguale, dalla cache");
+        let titles = |l: &Library| {
+            let mut t: Vec<String> = l
+                .albums
+                .iter()
+                .flat_map(|a| a.tracks.iter().map(|t| t.title.clone()))
+                .collect();
+            t.sort();
+            t
+        };
+        assert_eq!(titles(&first), titles(&second));
+        assert_eq!(second.albums.len(), first.albums.len());
+
+        // un file riscritto si rilegge; uno cancellato sparisce
+        std::thread::sleep(Duration::from_millis(20));
+        mp3_with_cover(&album.join("2 - Rumour.mp3"));
+        std::fs::remove_file(root.join("Sciolto.mp3")).unwrap();
+        let third = scan_cached(&root, 32, &no, Some(&cache), &|_, _| {});
+        assert!(
+            third.fresh <= 1,
+            "solo il file cambiato, visti {}",
+            third.fresh
+        );
+        assert_eq!(third.albums.len(), 1);
+        assert_eq!(third.albums[0].tracks.len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
