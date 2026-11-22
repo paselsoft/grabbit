@@ -105,6 +105,18 @@ impl App {
     pub(super) fn torrent_card(&mut self, ui: &mut egui::Ui) {
         let weak = ui.visuals().weak_text_color();
         card(ui, |ui| {
+            // torrent finiti (in condivisione o fermi al 100%): «Togli i completati»
+            let done: Vec<(TApp, String)> = self
+                .torrents
+                .lists
+                .iter()
+                .flatten()
+                .filter_map(|(_, l)| l.as_ref().ok())
+                .flatten()
+                .filter(|t| t.progress >= 1.0)
+                .map(|t| (t.app, t.id.clone()))
+                .collect();
+            let mut clear = false;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr!("Torrent", "Torrents")).strong());
                 ui.add_space(8.0);
@@ -117,7 +129,35 @@ impl App {
                         self.cfg.save();
                     }
                 }
+                if !done.is_empty() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        clear = ui
+                            .small_button(tr!(
+                                format!("Togli i completati ({})", done.len()),
+                                format!("Remove completed ({})", done.len())
+                            ))
+                            .on_hover_text(tr!(
+                                "I torrent finiti escono dall'app torrent e smettono di essere condivisi; i file scaricati restano nella cartella.",
+                                "Finished torrents leave the torrent app and stop seeding; the downloaded files stay in the folder."
+                            ))
+                            .clicked();
+                    });
+                }
             });
+            if clear {
+                let n = done.len();
+                for (app, id) in done {
+                    let _ = self.torrent_tx.send(Cmd::Remove(app, id));
+                }
+                let _ = self.torrent_tx.send(Cmd::Refresh);
+                self.torrents.notice = Some((
+                    tr!(
+                        format!("Tolti {n} torrent completati: i file restano nella cartella"),
+                        format!("Removed {n} completed torrents: the files stay in the folder")
+                    ),
+                    true,
+                ));
+            }
             if let Some((text, ok)) = &self.torrents.notice {
                 ui.label(
                     RichText::new(text)
