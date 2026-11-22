@@ -393,3 +393,31 @@ Accettazione:
 - [unit] qBittorrent: num_seeds/num_leechs e num_complete/num_incomplete; Transmission: peersSendingToUs, peersConnected e trackerStats (il conteggio più alto, -1 = non si sa).
 - [snap] Riga con «seed 6 (7) · peer 0 (50)».
 Stato: fatta
+
+## Milestone 13: libreria più ordinata (0.15.0)
+
+S-037, S-038, S-039
+
+### S-037 Copertine dalla cartella dell'album
+Come utente, un album senza copertina nei brani prende l'immagine della sua cartella (`folder.jpg`,
+`cover.jpg`, `front.jpg`…, anche in «Artwork» o «Scans», o nella cartella dell'album per «CD1»).
+Accettazione:
+- [unit] Album con due dischi e `folder.jpg` nella cartella madre: copertina presente.
+- [snap] «2015 - 25» con `cover.jpg` mostra la copertina.
+Stato: fatta
+
+### S-038 Nomi degli album dai tag
+Come utente, «Adele.-.30.(RTI).PBTHAL.(2021.-.Pop).[Flac.24-96.LP]-xpost» si chiama «30», il titolo
+scritto nei tag; senza titolo nei tag resta il nome della cartella, e l'anno davanti al nome
+(«2015 - 25») vale se i tag non hanno l'anno.
+Accettazione:
+- [unit] Titolo più frequente tra i brani; cartella se manca; anno dalla cartella.
+Stato: fatta
+
+### S-039 Album su più dischi
+Come utente, «Album/CD1», «Album/CD2» e «Album/Bonus CD» sono un solo album, con i brani disco per
+disco (il bonus in fondo) e le intestazioni «Disco 1», «Disco 2», «Bonus».
+Accettazione:
+- [unit] Cartelle dei dischi riconosciute («CD1», «CD 2», «Disc 3», «Disco 1», «Bonus CD»); un album con i brani in ordine.
+- [snap] Vista dell'album con «Disco 1» e «Disco 2».
+Stato: fatta
