@@ -449,3 +449,20 @@ menu compare la spunta per qualche secondo.
 Accettazione:
 - [manual] Sul Mac: notifica e spunta a fine torrent.
 Stato: fatta
+
+## Milestone 15: album «immagine + CUE» (0.17.0)
+
+S-043
+
+### S-043 Dividi in brani
+Come utente con un album scaricato come un solo file più il suo .cue (es. «Lucio Battisti - Pensieri e
+Parole.flac» e «.cue»), premo «Dividi in brani» nella vista dell'album: Grabbit crea un file per brano
+(«01 - Le Tre Verità.flac»…) con titolo, artista, album, anno, numero e copertina, senza perdere
+qualità, poi sposta il file intero e il .cue nel Cestino; «Ascolta» si aggiorna.
+Accettazione:
+- [unit] .cue letto (INDEX 01, non il pregap; 75 fotogrammi al secondo; UTF-8, BOM e Windows-1252); un .cue con più file non si divide.
+- [unit] Divisione vera con ffmpeg: 3 brani con titoli, numeri e durate; il .cue dice «.wav» ma il file è «.flac».
+- [unit] ffmpeg che dice «fatto» senza creare i file: errore e originali intatti.
+- [snap] Pulsante «Dividi in brani» solo sugli album con .cue; copertina da «Scans/front.jpg».
+- [manual] Sul Mac: l'album di Battisti diviso in 10 brani.
+Stato: fatta

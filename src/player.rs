@@ -58,6 +58,8 @@ pub struct Album {
     pub cover: Option<(u32, u32, Vec<u8>)>,
     /// formati delle altre copie dello stesso album nella libreria («FLAC» per la copia MP3)
     pub twins: Vec<&'static str>,
+    /// album «immagine + CUE»: il .cue e il file audio intero, per «Dividi in brani»
+    pub cue: Option<(PathBuf, PathBuf)>,
 }
 
 #[derive(Debug, Default)]
@@ -416,6 +418,11 @@ pub fn scan_cached(
                 .and_then(|b| crate::search::decode_cover(&b, cover_px).ok()),
             (None, _) => None,
         };
+        // un file intero con il suo .cue: si può dividere in brani
+        if !album.loose && album.tracks.len() <= SINGLE_MAX_TRACKS {
+            album.cue = crate::cue::find_in(&dir)
+                .filter(|(_, audio)| album.tracks.iter().any(|t| &t.path == audio));
+        }
         albums.push(album);
         from_tag.push(named_by_tag);
     }
@@ -662,7 +669,7 @@ fn disc_folder(name: &str) -> Option<u32> {
 /// Immagine della copertina nella cartella dell'album, per gli album senza copertina nei
 /// brani: prima «cover», «folder», «front», «album…», poi una qualsiasi; poi le sottocartelle
 /// «Artwork», «Scans», «Covers».
-fn folder_image(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn folder_image(dir: &Path) -> Option<PathBuf> {
     fn images(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return Vec::new();
