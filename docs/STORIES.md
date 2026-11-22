@@ -316,3 +316,11 @@ Accettazione:
 - [ci] Compila per macOS: `setApplicationIconImage` e `applicationDockMenu:` aggiunto al delegato di winit.
 - [manual] Sul Mac (High Sierra): barra sull'icona durante un download, icona normale alla fine, menu del tasto destro che funziona.
 Stato: fatta
+
+### S-028 Magnet e file diretti incollati in «Scarica»
+Come utente, se incollo un magnet, un .torrent o un file diretto (.iso, .zip…) nella scheda «Scarica»,
+Grabbit non lo passa a yt-dlp (che darebbe errore) ma all'app torrent o alla scheda «File», e apre «File».
+Accettazione:
+- [unit] I link si dividono in video e musica, torrent, file diretti; le ricerche restano a yt-dlp.
+- [snap] Magnet incollato in «Scarica»: si apre «File» con «Aggiunto a Transmission: <nome>».
+Stato: fatta
