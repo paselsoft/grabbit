@@ -19,6 +19,8 @@ pub struct MenuBarUi {
     /// file e torrent messi in pausa dal menu, da riprendere con «Riprendi»
     pub paused_files: Vec<u64>,
     pub paused_torrents: Vec<(torrent::App, String)>,
+    /// file della scheda «File» già visti finiti (None al primo giro: quelli finiti prima)
+    pub files_done: Option<std::collections::HashSet<u64>>,
 }
 
 fn short(name: &str) -> String {
@@ -51,6 +53,10 @@ impl App {
         self.menubar_ui.last = Some(Instant::now());
         let st = self.menubar_status();
         self.menubar.update(&st);
+        // file della scheda «File» appena finiti nella cartella della musica: «Ascolta» si aggiorna
+        for path in self.files_just_done() {
+            self.music_changed(ctx, &path);
+        }
         // mentre si scarica (o la spunta è visibile) la barra si aggiorna anche senza mouse
         if st.active > 0 || self.menubar_ui.done_until.is_some() {
             ctx.request_repaint_after(Duration::from_millis(600));
@@ -114,6 +120,31 @@ impl App {
         st.look_done = self.menubar_ui.done_until.is_some();
         st.look_failed = self.menubar_ui.failed;
         st
+    }
+
+    /// Un torrent è appena finito: la spunta per qualche secondo nella barra dei menu.
+    pub(super) fn menubar_torrent_done(&mut self) {
+        self.menubar_ui.done_until = Some(Instant::now() + Duration::from_secs(5));
+        self.menubar_ui.last = None;
+    }
+
+    /// File della scheda «File» finiti dall'ultima volta (dove sono stati salvati).
+    fn files_just_done(&mut self) -> Vec<std::path::PathBuf> {
+        let snap = self.dm.snapshot();
+        let done: Vec<_> = snap
+            .items
+            .iter()
+            .filter(|i| i.state == State::Done)
+            .map(|i| (i.id, i.final_path.clone()))
+            .collect();
+        let Some(seen) = self.menubar_ui.files_done.as_mut() else {
+            self.menubar_ui.files_done = Some(done.into_iter().map(|d| d.0).collect());
+            return Vec::new();
+        };
+        done.into_iter()
+            .filter(|(id, _)| seen.insert(*id))
+            .filter_map(|(_, p)| p)
+            .collect()
     }
 
     /// Un giro di download con yt-dlp è finito: spunta, oppure pallino se qualcosa non è riuscito.

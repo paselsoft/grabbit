@@ -913,7 +913,7 @@ impl App {
                     .collect();
                 self.add_torrents(files);
             }
-            Msg::Torrent(u) => self.torrent_update(u),
+            Msg::Torrent(u) => self.torrent_update(u, ctx),
             Msg::DmFolder(p) => {
                 self.cfg.dm_dir = p;
                 self.cfg.save();
@@ -2926,6 +2926,18 @@ impl App {
             .player_dir
             .clone()
             .unwrap_or_else(|| self.cfg.out_dir.clone())
+    }
+
+    /// Un file o una cartella nuova è arrivata (torrent finito, file della scheda «File»):
+    /// se è nella cartella della musica, «Ascolta» si aggiorna da solo.
+    fn music_changed(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        if !path.starts_with(self.listen_dir()) {
+            return;
+        }
+        self.listen.stale = true;
+        if self.listen.library.is_some() && !self.listen.busy {
+            self.start_scan(ctx);
+        }
     }
 
     /// Rilegge la cartella della musica (in un thread a parte).
