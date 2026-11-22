@@ -351,6 +351,7 @@ impl App {
             let send = app.sender(&cc.egui_ctx);
             crate::torrent::spawn(
                 app.cfg.transmission_port,
+                app.cfg.qbittorrent_port,
                 trx,
                 move || watch.load(Ordering::Relaxed),
                 move |u| send(Msg::Torrent(u)),

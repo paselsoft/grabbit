@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Riquadro «Torrent» della scheda «File»: i torrent di Transmission, comandati da Grabbit.
+//! Riquadro «Torrent» della scheda «File»: i torrent di Transmission e qBittorrent.
 use super::{card, open_folder, progress_row, reveal, App, ACCENT, ERR, OK, WARN};
 use crate::dm;
 use crate::torrent::{self, Cmd, Status, Torrent, Update};
 use crate::tr;
 use eframe::egui::{self, Color32, RichText};
 use std::path::{Path, PathBuf};
+use torrent::App as TApp;
 
-/// Ultimo elenco letto da Transmission e ultimo esito da mostrare.
+/// Ultimi elenchi letti dalle app e ultimo esito da mostrare.
 #[derive(Default)]
 pub struct TorrentUi {
-    pub list: Option<Result<Vec<Torrent>, String>>,
+    pub lists: Option<torrent::AppLists>,
     /// testo ed esito (true = andato bene)
     pub notice: Option<(String, bool)>,
 }
@@ -42,24 +43,29 @@ fn status_color(t: &Torrent, weak: Color32) -> Color32 {
 }
 
 impl App {
-    /// Manda magnet, indirizzi .torrent o file .torrent a Transmission (o all'app predefinita).
+    /// Manda magnet, indirizzi .torrent o file .torrent all'app scelta (o all'app predefinita).
     pub(super) fn add_torrents(&mut self, sources: Vec<String>) {
         if sources.is_empty() {
             return;
         }
+        let app = self.cfg.torrent_app;
         self.torrents.notice = Some((
-            tr!("Invio a Transmission…", "Sending to Transmission…").into(),
+            tr!(
+                format!("Invio a {}…", app.label()),
+                format!("Sending to {}…", app.label())
+            ),
             true,
         ));
         let _ = self
             .torrent_tx
-            .send(Cmd::Add(sources, self.cfg.dm_dir.clone()));
+            .send(Cmd::Add(sources, self.cfg.dm_dir.clone(), app));
     }
 
     pub(super) fn torrent_update(&mut self, u: Update) {
         match u {
-            Update::List(l) => self.torrents.list = Some(l),
+            Update::List(l) => self.torrents.lists = Some(l),
             Update::Added {
+                app,
                 added,
                 opened,
                 errors,
@@ -72,14 +78,20 @@ impl App {
                         .collect::<Vec<_>>()
                         .join(", ");
                     parts.push(tr!(
-                        format!("Aggiunto a Transmission: {names}"),
-                        format!("Added to Transmission: {names}")
+                        format!("Aggiunto a {}: {names}", app.label()),
+                        format!("Added to {}: {names}", app.label())
                     ));
                 }
                 if opened > 0 {
                     parts.push(tr!(
-                        format!("Transmission non risponde: {opened} aperti con l'app predefinita per i torrent"),
-                        format!("Transmission does not respond: {opened} opened with the default torrent app")
+                        format!(
+                            "{} non risponde: {opened} aperti con l'app predefinita per i torrent",
+                            app.label()
+                        ),
+                        format!(
+                            "{} does not respond: {opened} opened with the default torrent app",
+                            app.label()
+                        )
                     ));
                 }
                 let ok = errors.is_empty();
@@ -95,11 +107,16 @@ impl App {
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(tr!("Torrent", "Torrents")).strong());
-                ui.label(
-                    RichText::new(tr!("tramite Transmission", "via Transmission"))
-                        .small()
-                        .color(weak),
-                );
+                ui.add_space(8.0);
+                ui.label(tr!("Aggiungi a", "Add to"));
+                for app in TApp::ALL {
+                    if ui.radio(self.cfg.torrent_app == app, app.label()).clicked()
+                        && self.cfg.torrent_app != app
+                    {
+                        self.cfg.torrent_app = app;
+                        self.cfg.save();
+                    }
+                }
             });
             if let Some((text, ok)) = &self.torrents.notice {
                 ui.label(
@@ -108,51 +125,67 @@ impl App {
                         .color(if *ok { OK } else { ERR }),
                 );
             }
+            let chosen = self.cfg.torrent_app;
             let mut actions: Vec<Cmd> = Vec::new();
-            match &self.torrents.list {
-                None => {
-                    ui.label(
-                        RichText::new(tr!(
-                            "Collegamento a Transmission…",
-                            "Connecting to Transmission…"
-                        ))
+            let Some(lists) = &self.torrents.lists else {
+                ui.label(
+                    RichText::new(tr!("Collegamento alle app…", "Connecting to the apps…"))
                         .color(weak),
-                    );
+                );
+                return;
+            };
+            // l'app scelta che non risponde lo dice con il rimedio; l'altra solo se ha un
+            // problema diverso dall'essere chiusa (chi non la usa non vede niente)
+            for (app, l) in lists {
+                let Err(e) = l else { continue };
+                if *app != chosen && torrent::is_not_running_text(e) {
+                    continue;
                 }
-                Some(Err(e)) => {
-                    ui.label(RichText::new(e).small().color(WARN));
-                    if cfg!(target_os = "macos")
-                        && ui
-                            .button(tr!("Apri Transmission", "Open Transmission"))
-                            .clicked()
-                    {
-                        torrent::launch_transmission();
-                        actions.push(Cmd::Refresh);
-                    }
-                    ui.label(
-                        RichText::new(tr!(
-                            "Senza Transmission i link magnet e i .torrent si aprono con l'app predefinita per i torrent.",
-                            "Without Transmission, magnet links and .torrent files open with the default torrent app."
-                        ))
-                        .small()
-                        .color(weak),
-                    );
+                ui.label(RichText::new(e).small().color(WARN));
+                if *app == chosen {
+                    ui.horizontal(|ui| {
+                        if cfg!(target_os = "macos")
+                            && ui
+                                .button(tr!(
+                                    format!("Apri {}", app.label()),
+                                    format!("Open {}", app.label())
+                                ))
+                                .clicked()
+                        {
+                            app.launch();
+                            actions.push(Cmd::Refresh);
+                        }
+                        ui.label(
+                            RichText::new(tr!(
+                                "Intanto i link magnet e i .torrent si aprono con l'app predefinita per i torrent.",
+                                "Meanwhile magnet links and .torrent files open with the default torrent app."
+                            ))
+                            .small()
+                            .color(weak),
+                        );
+                    });
                 }
-                Some(Ok(list)) if list.is_empty() => {
-                    ui.label(
-                        RichText::new(tr!(
-                            "Nessun torrent in Transmission. Incolla qui sopra un link magnet o un indirizzo .torrent, oppure premi «Scegli file .torrent…».",
-                            "No torrents in Transmission. Paste a magnet link or a .torrent address above, or press “Choose .torrent files…”."
-                        ))
-                        .color(weak),
-                    );
-                }
-                Some(Ok(list)) => {
-                    for t in list {
-                        ui.add_space(4.0);
-                        torrent_row(ui, t, weak, &mut actions);
-                    }
-                }
+            }
+            let all: Vec<&Torrent> = lists
+                .iter()
+                .filter_map(|(_, l)| l.as_ref().ok())
+                .flatten()
+                .collect();
+            let chosen_ok = lists.iter().any(|(a, l)| *a == chosen && l.is_ok());
+            if all.is_empty() && chosen_ok {
+                ui.label(
+                    RichText::new(tr!(
+                        "Nessun torrent. Incolla qui sopra un link magnet o un indirizzo .torrent, oppure premi «Scegli file .torrent…».",
+                        "No torrents. Paste a magnet link or a .torrent address above, or press “Choose .torrent files…”."
+                    ))
+                    .color(weak),
+                );
+            }
+            // l'etichetta dell'app serve solo se ne rispondono due
+            let both = lists.iter().filter(|(_, l)| l.is_ok()).count() > 1;
+            for t in all {
+                ui.add_space(4.0);
+                torrent_row(ui, t, weak, both, &mut actions);
             }
             for a in actions {
                 let _ = self.torrent_tx.send(a);
@@ -161,7 +194,13 @@ impl App {
     }
 }
 
-fn torrent_row(ui: &mut egui::Ui, t: &Torrent, weak: Color32, actions: &mut Vec<Cmd>) {
+fn torrent_row(
+    ui: &mut egui::Ui,
+    t: &Torrent,
+    weak: Color32,
+    show_app: bool,
+    actions: &mut Vec<Cmd>,
+) {
     egui::Frame::group(ui.style())
         .corner_radius(8)
         .inner_margin(10)
@@ -179,6 +218,9 @@ fn torrent_row(ui: &mut egui::Ui, t: &Torrent, weak: Color32, actions: &mut Vec<
                     egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{name}: {state}"))
                 });
                 ui.label(RichText::new(state).small().color(col));
+                if show_app {
+                    ui.label(RichText::new(t.app.label()).small().color(weak));
+                }
             });
             if t.progress < 1.0 && t.total_bytes > 0 {
                 progress_row(ui, t.progress);
@@ -225,10 +267,10 @@ fn torrent_row(ui: &mut egui::Ui, t: &Torrent, weak: Color32, actions: &mut Vec<
             ui.horizontal_wrapped(|ui| {
                 if t.status == Status::Stopped {
                     if t.progress < 1.0 && ui.small_button(tr!("Riprendi", "Resume")).clicked() {
-                        actions.push(Cmd::Resume(t.id));
+                        actions.push(Cmd::Resume(t.app, t.id.clone()));
                     }
                 } else if ui.small_button(tr!("Pausa", "Pause")).clicked() {
-                    actions.push(Cmd::Pause(t.id));
+                    actions.push(Cmd::Pause(t.app, t.id.clone()));
                 }
                 if !t.dir.is_empty()
                     && ui
@@ -243,14 +285,17 @@ fn torrent_row(ui: &mut egui::Ui, t: &Torrent, weak: Color32, actions: &mut Vec<
                     }
                 }
                 if ui
-                    .small_button(tr!("Togli da Transmission", "Remove from Transmission"))
+                    .small_button(tr!(
+                        format!("Togli da {}", t.app.label()),
+                        format!("Remove from {}", t.app.label())
+                    ))
                     .on_hover_text(tr!(
-                        "Il torrent esce da Transmission; i file già scaricati restano nella cartella.",
-                        "The torrent leaves Transmission; files already downloaded stay in the folder."
+                        "Il torrent esce dall'app; i file già scaricati restano nella cartella.",
+                        "The torrent leaves the app; files already downloaded stay in the folder."
                     ))
                     .clicked()
                 {
-                    actions.push(Cmd::Remove(t.id));
+                    actions.push(Cmd::Remove(t.app, t.id.clone()));
                 }
             });
         });
