@@ -20,7 +20,7 @@ pub use qbit::{QBittorrent, DEFAULT_PORT as QBIT_PORT};
 pub const DEFAULT_PORT: u16 = 9091;
 
 /// L'app torrent che fa il lavoro.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum App {
     #[default]
     Transmission,

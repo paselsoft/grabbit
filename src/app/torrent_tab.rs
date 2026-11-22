@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Riquadro «Torrent» della scheda «File»: i torrent di Transmission e qBittorrent.
-use super::{card, open_folder, progress_row, reveal, App, ACCENT, ERR, OK, WARN};
+use super::{card, notify, open_folder, progress_row, reveal, App, ACCENT, ERR, OK, WARN};
 use crate::dm;
 use crate::torrent::{self, Cmd, Status, Torrent, Update};
 use crate::tr;
@@ -14,6 +14,24 @@ pub struct TorrentUi {
     pub lists: Option<torrent::AppLists>,
     /// testo ed esito (true = andato bene)
     pub notice: Option<(String, bool)>,
+    /// avanzamento visto l'ultima volta per ogni torrent: per accorgersi di quando finisce
+    pub seen: std::collections::HashMap<(TApp, String), f32>,
+}
+
+/// Torrent appena finiti: quelli che l'ultima volta erano sotto il 100% e ora ci sono.
+/// Un torrent visto per la prima volta già finito non conta (era finito prima).
+pub fn newly_finished(
+    seen: &mut std::collections::HashMap<(TApp, String), f32>,
+    lists: &torrent::AppLists,
+) -> Vec<(String, PathBuf)> {
+    let mut done = Vec::new();
+    for t in lists.iter().filter_map(|(_, l)| l.as_ref().ok()).flatten() {
+        let prev = seen.insert((t.app, t.id.clone()), t.progress);
+        if prev.is_some_and(|p| p < 1.0) && t.progress >= 1.0 {
+            done.push((t.name.clone(), Path::new(&t.dir).join(&t.name)));
+        }
+    }
+    done
 }
 
 fn status_text(t: &Torrent) -> &'static str {
@@ -61,9 +79,24 @@ impl App {
             .send(Cmd::Add(sources, self.cfg.dm_dir.clone(), app));
     }
 
-    pub(super) fn torrent_update(&mut self, u: Update) {
+    pub(super) fn torrent_update(&mut self, u: Update, ctx: &egui::Context) {
         match u {
-            Update::List(l) => self.torrents.lists = Some(l),
+            Update::List(l) => {
+                let finished = newly_finished(&mut self.torrents.seen, &l);
+                self.torrents.lists = Some(l);
+                for (name, path) in finished {
+                    // notifica come per i download finiti, e «Ascolta» si aggiorna da solo
+                    notify(
+                        "Grabbit",
+                        &tr!(
+                            format!("Torrent finito: {name}"),
+                            format!("Torrent finished: {name}")
+                        ),
+                    );
+                    self.menubar_torrent_done();
+                    self.music_changed(ctx, &path);
+                }
+            }
             Update::Added {
                 app,
                 added,
@@ -345,4 +378,48 @@ fn torrent_row(
                 }
             });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(items: &[(&str, f32)]) -> torrent::AppLists {
+        let ts = items
+            .iter()
+            .map(|(id, p)| Torrent {
+                app: TApp::QBittorrent,
+                id: (*id).into(),
+                name: format!("Album {id}"),
+                status: Status::Downloading,
+                progress: *p,
+                done_bytes: 0,
+                total_bytes: 0,
+                down_rate: 0,
+                up_rate: 0,
+                eta: None,
+                seeds: 0,
+                peers: 0,
+                swarm_seeds: None,
+                swarm_peers: None,
+                dir: "/Users/paolo/Music".into(),
+                error: None,
+                fetching_metadata: false,
+            })
+            .collect();
+        vec![(TApp::QBittorrent, Ok(ts))]
+    }
+
+    #[test]
+    fn only_torrents_that_reach_100_percent_count() {
+        let mut seen = Default::default();
+        // primo giro: uno già finito (finito prima), uno a metà
+        assert!(newly_finished(&mut seen, &list(&[("a", 1.0), ("b", 0.5)])).is_empty());
+        // «b» arriva al 100%: si segnala una volta sola
+        let done = newly_finished(&mut seen, &list(&[("a", 1.0), ("b", 1.0)]));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, "Album b");
+        assert_eq!(done[0].1, PathBuf::from("/Users/paolo/Music/Album b"));
+        assert!(newly_finished(&mut seen, &list(&[("a", 1.0), ("b", 1.0)])).is_empty());
+    }
 }

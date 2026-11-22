@@ -430,3 +430,22 @@ Accettazione:
 - [unit] Copie dello stesso disco: stesso artista, stessi brani (numero e durata entro il 2% o 10 s), nomi compatibili («19» e «19-Deluxe-Edition»); due edizioni diverse («25» da 14 e da 11 brani) no.
 - [snap] «Tutto accade» in MP3 e FLAC con le due scritte.
 Stato: fatta
+
+## Milestone 14: libreria che si aggiorna da sola (0.16.0)
+
+S-041, S-042
+
+### S-041 «Ascolta» si aggiorna quando arriva musica nuova
+Come utente, quando un torrent o un file della scheda «File» finisce dentro la cartella della musica,
+«Ascolta» rilegge la cartella da solo (con la scansione incrementale è immediato), senza «Aggiorna».
+Accettazione:
+- [unit] Un torrent conta come finito solo quando passa dal sotto 100% al 100%, una volta sola; uno già finito al primo giro no.
+- [manual] Sul Mac: un album scaricato con qBittorrent nella cartella della musica compare in «Ascolta».
+Stato: fatta
+
+### S-042 Notifica a fine torrent
+Come utente, quando un torrent finisce ricevo la notifica «Torrent finito: <nome>» e nella barra dei
+menu compare la spunta per qualche secondo.
+Accettazione:
+- [manual] Sul Mac: notifica e spunta a fine torrent.
+Stato: fatta
