@@ -2928,7 +2928,8 @@ impl App {
         let px = (COVER_LIST * ctx.pixels_per_point().max(1.0)).round() as u32 * 2;
         let send = self.sender(ctx);
         thread::spawn(move || {
-            let library = player::scan(&dir, px, &cancel);
+            let cache = tools::data_dir().join("library-cache");
+            let library = player::scan_cached(&dir, px, &cancel, Some(&cache));
             send(Msg::Library { seq, library });
         });
     }

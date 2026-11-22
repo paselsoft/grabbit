@@ -361,3 +361,12 @@ Accettazione:
 - [manual] Sul Mac: chiusura con il pallino rosso (notifica la prima volta), download che continua, riapertura dal menu e dal Dock, «Esci da Grabbit».
 - [manual] Opzioni avanzate › «Chiudendo la finestra resta nella barra dei menu» spenta: Grabbit si chiude come prima.
 Stato: fatta
+
+### S-033 Scansione incrementale della musica
+Come utente con molta musica, «Ascolta» non rilegge ogni volta tutti i brani: come un backup
+incrementale, Grabbit ricorda i dati di ogni file (con dimensione e data di modifica) e riapre solo i
+file nuovi o cambiati; le copertine già rimpicciolite restano in cache.
+Accettazione:
+- [unit] Seconda scansione senza file riaperti, stesso elenco e stessa copertina; un file cambiato si rilegge, uno cancellato sparisce.
+- [manual] Sul Mac, con la libreria vera: la seconda apertura di «Ascolta» è molto più veloce.
+Stato: fatta
