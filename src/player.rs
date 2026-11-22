@@ -194,15 +194,17 @@ fn ext_of(p: &Path) -> String {
 /// `root` formano l'album «Brani sciolti»). `cover_px` è il lato massimo delle copertine.
 #[cfg(test)]
 pub fn scan(root: &Path, cover_px: u32, cancel: &AtomicBool) -> Library {
-    scan_cached(root, cover_px, cancel, None)
+    scan_cached(root, cover_px, cancel, None, &|_, _| {})
 }
 
 /// Come `scan`, ma con la cache in `cache_dir`: si riaprono solo i file nuovi o cambiati.
+/// `progress(fatti, totale)` dice quanti brani sono stati letti (al più ogni 0,1%).
 pub fn scan_cached(
     root: &Path,
     cover_px: u32,
     cancel: &AtomicBool,
     cache_dir: Option<&Path>,
+    progress: &dyn Fn(usize, usize),
 ) -> Library {
     let old = cache_dir.map(load_cache).unwrap_or_default();
     let mut new = ScanCache {
@@ -211,6 +213,8 @@ pub fn scan_cached(
     };
     let mut used_covers = std::collections::HashSet::new();
     let mut lib = Library::default();
+    // 1) si elencano le cartelle e si contano i brani (veloce): serve per la percentuale
+    let mut found: Vec<(PathBuf, usize, Vec<PathBuf>)> = Vec::new();
     let mut dirs = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = dirs.pop() {
         if cancel.load(Ordering::Relaxed) {
@@ -242,8 +246,18 @@ pub fn scan_cached(
                 lib.unsupported += 1;
             }
         }
-        if files.is_empty() {
-            continue;
+        if !files.is_empty() {
+            found.push((dir, depth, files));
+        }
+    }
+    // 2) si leggono i brani (dalla cache quelli già visti), dicendo a che punto si è
+    let total: usize = found.iter().map(|f| f.2.len()).sum();
+    let mut done = 0usize;
+    let mut last_step = usize::MAX;
+    progress(0, total);
+    for (dir, depth, files) in found {
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
         let mut album = Album {
             loose: dir == root,
@@ -262,6 +276,12 @@ pub fn scan_cached(
         let mut cover_from: Option<(PathBuf, (u64, u128))> = None;
         let mut years = Vec::new();
         for f in files {
+            done += 1;
+            let step = done * 1000 / total.max(1);
+            if step != last_step {
+                last_step = step;
+                progress(done, total);
+            }
             let st = stamp(&f);
             let cached = st.and_then(|st| {
                 old.files
@@ -1370,8 +1390,15 @@ mod tests {
         mp3_with_cover(&root.join("Sciolto.mp3"));
         let no = AtomicBool::new(false);
 
-        let first = scan_cached(&root, 32, &no, Some(&cache));
+        let seen = std::cell::RefCell::new(Vec::new());
+        let first = scan_cached(&root, 32, &no, Some(&cache), &|d, t| {
+            seen.borrow_mut().push((d, t))
+        });
         assert_eq!(first.fresh, 3);
+        // l'avanzamento parte da 0 e arriva a tutti i brani
+        let seen = seen.into_inner();
+        assert_eq!(seen.first(), Some(&(0, 3)));
+        assert_eq!(seen.last(), Some(&(3, 3)));
         let cover = |l: &Library| {
             l.albums
                 .iter()
@@ -1381,7 +1408,7 @@ mod tests {
         let c1 = cover(&first).expect("copertina letta dall'MP3");
         assert_eq!(c1.2[..3], [200, 30, 30]);
 
-        let second = scan_cached(&root, 32, &no, Some(&cache));
+        let second = scan_cached(&root, 32, &no, Some(&cache), &|_, _| {});
         assert_eq!(second.fresh, 0, "nessun file riaperto");
         assert_eq!(cover(&second).unwrap(), c1, "copertina uguale, dalla cache");
         let titles = |l: &Library| {
@@ -1400,7 +1427,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(20));
         mp3_with_cover(&album.join("2 - Rumour.mp3"));
         std::fs::remove_file(root.join("Sciolto.mp3")).unwrap();
-        let third = scan_cached(&root, 32, &no, Some(&cache));
+        let third = scan_cached(&root, 32, &no, Some(&cache), &|_, _| {});
         assert!(
             third.fresh <= 1,
             "solo il file cambiato, visti {}",

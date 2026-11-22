@@ -89,6 +89,12 @@ enum Msg {
     Folder(PathBuf, Mode),
     /// cartella della musica scelta per «Ascolta»
     PlayerDir(PathBuf),
+    /// a che punto è la lettura della cartella della musica: brani letti su totale
+    ScanProgress {
+        seq: u64,
+        done: usize,
+        total: usize,
+    },
     /// libreria musicale letta (`seq` scarta le letture superate)
     Library {
         seq: u64,
@@ -917,6 +923,11 @@ impl App {
                 self.cfg.save();
                 self.listen.open = None;
                 self.start_scan(ctx);
+            }
+            Msg::ScanProgress { seq, done, total } => {
+                if seq == self.listen.seq {
+                    self.listen.progress = Some((done, total));
+                }
             }
             Msg::Library { seq, library } => {
                 if seq == self.listen.seq {
@@ -2776,6 +2787,8 @@ enum Tab {
 struct ListenUi {
     library: Option<player::Library>,
     busy: bool,
+    /// lettura della cartella in corso: brani letti, totale
+    progress: Option<(usize, usize)>,
     seq: u64,
     cancel: Arc<AtomicBool>,
     /// la cartella è cambiata dall'ultima lettura (nuovi download): va riletta
@@ -2923,13 +2936,17 @@ impl App {
         self.listen.seq += 1;
         self.listen.busy = true;
         self.listen.stale = false;
+        self.listen.progress = None;
         let seq = self.listen.seq;
         let dir = self.listen_dir();
         let px = (COVER_LIST * ctx.pixels_per_point().max(1.0)).round() as u32 * 2;
         let send = self.sender(ctx);
         thread::spawn(move || {
             let cache = tools::data_dir().join("library-cache");
-            let library = player::scan_cached(&dir, px, &cancel, Some(&cache));
+            let tell = send.clone();
+            let library = player::scan_cached(&dir, px, &cancel, Some(&cache), &|done, total| {
+                tell(Msg::ScanProgress { seq, done, total })
+            });
             send(Msg::Library { seq, library });
         });
     }
@@ -3376,8 +3393,21 @@ impl App {
             if self.listen.busy {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(tr!("Leggo la cartella…", "Reading the folder…"));
+                    match self.listen.progress {
+                        Some((done, total)) if total > 0 => ui.label(tr!(
+                            format!("Leggo la cartella… {done} di {total} brani"),
+                            format!("Reading the folder… {done} of {total} tracks")
+                        )),
+                        // prima fase: si contano i brani
+                        _ => ui.label(tr!(
+                            "Leggo la cartella… conto i brani",
+                            "Reading the folder… counting the tracks"
+                        )),
+                    };
                 });
+                if let Some((done, total)) = self.listen.progress.filter(|p| p.1 > 0) {
+                    progress_row(ui, done as f32 / total as f32);
+                }
             }
             let Some(lib) = &self.listen.library else {
                 return;

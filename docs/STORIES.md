@@ -370,3 +370,11 @@ Accettazione:
 - [unit] Seconda scansione senza file riaperti, stesso elenco e stessa copertina; un file cambiato si rilegge, uno cancellato sparisce.
 - [manual] Sul Mac, con la libreria vera: la seconda apertura di «Ascolta» è molto più veloce.
 Stato: fatta
+
+### S-034 Avanzamento della lettura della cartella
+Come utente, mentre «Ascolta» legge la cartella della musica vedo a che punto è: «Leggo la cartella…
+N di M brani» con la barra e la percentuale.
+Accettazione:
+- [unit] L'avanzamento parte da 0 e arriva al totale dei brani.
+- [snap] Durante la lettura: testo «20 di 200 brani» e barra al 10%.
+Stato: fatta
