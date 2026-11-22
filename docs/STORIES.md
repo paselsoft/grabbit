@@ -307,3 +307,12 @@ Accettazione:
 - [ci] Compila per macOS (Rust puro sulle API di AppKit, nessun codice C).
 - [manual] Sul Mac (High Sierra): icona, menu, limite, «Scarica il link copiato», numero sul Dock.
 Stato: fatta
+
+### S-027 Barra sull'icona del Dock e menu del tasto destro
+Come utente del Mac, l'icona di Grabbit nel Dock ha una barra di avanzamento mentre scarica, e con il
+tasto destro trovo le stesse voci del menu della barra dei menu.
+Accettazione:
+- [unit] Icona del Dock 256×256 con la barra (bianca fino all'avanzamento, fondo scuro dopo), il logo sopra resta uguale.
+- [ci] Compila per macOS: `setApplicationIconImage` e `applicationDockMenu:` aggiunto al delegato di winit.
+- [manual] Sul Mac (High Sierra): barra sull'icona durante un download, icona normale alla fine, menu del tasto destro che funziona.
+Stato: fatta

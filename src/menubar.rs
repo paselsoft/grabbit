@@ -273,6 +273,51 @@ impl Action {
     }
 }
 
+/// Passi della barra sull'icona del Dock (si ridisegna solo quando cambia il passo).
+pub const DOCK_STEPS: f32 = 24.0;
+
+/// L'icona di Grabbit con la barra di avanzamento in basso, come PNG per il Dock.
+pub fn dock_icon_png(fraction: f32) -> Option<Vec<u8>> {
+    const SIZE: u32 = 256;
+    let base = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?;
+    let mut img = image::imageops::resize(
+        &base.to_rgba8(),
+        SIZE,
+        SIZE,
+        image::imageops::FilterType::Triangle,
+    );
+    // barra con gli angoli tondi: fondo scuro trasparente, riempimento bianco
+    let (x0, x1, y0, y1, r) = (40.0_f32, 216.0_f32, 216.0_f32, 238.0_f32, 11.0_f32);
+    let fill_end = x0 + (x1 - x0) * fraction.clamp(0.0, 1.0);
+    for y in (y0 as u32)..(y1 as u32) {
+        for x in (x0 as u32)..(x1 as u32) {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            // distanza dal rettangolo arrotondato: dentro se <= 0
+            let qx = (px - (x0 + x1) / 2.0).abs() - ((x1 - x0) / 2.0 - r);
+            let qy = (py - (y0 + y1) / 2.0).abs() - ((y1 - y0) / 2.0 - r);
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() - r;
+            let cover = (0.5 - d).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let (color, a) = if px <= fill_end {
+                ([255.0, 255.0, 255.0], 1.0)
+            } else {
+                ([26.0, 15.0, 5.0], 0.6)
+            };
+            let a = a * cover;
+            let p = img.get_pixel_mut(x, y);
+            for (ch, col) in p.0.iter_mut().zip(color) {
+                *ch = (*ch as f32 * (1.0 - a) + col * a).round() as u8;
+            }
+            p.0[3] = (p.0[3] as f32 + (255.0 - p.0[3] as f32) * a).round() as u8;
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
 pub use imp::MenuBar;
 
 #[cfg(target_os = "macos")]
@@ -290,6 +335,9 @@ mod imp {
         shown: Option<Status>,
         look: Option<Look>,
         badge: Option<String>,
+        /// passo della barra sull'icona del Dock mostrato (None = icona normale)
+        dock_step: Option<u8>,
+        dock_menu_ready: bool,
         failed: bool,
     }
 
@@ -310,6 +358,8 @@ mod imp {
                 shown: None,
                 look: None,
                 badge: None,
+                dock_step: None,
+                dock_menu_ready: false,
                 failed: false,
             }
         }
@@ -359,6 +409,23 @@ mod imp {
             if badge != self.badge {
                 dock_badge(badge.as_deref());
                 self.badge = badge;
+            }
+            // barra di avanzamento sull'icona del Dock
+            let step = st
+                .fraction
+                .filter(|_| st.active > 0)
+                .map(|f| (f.clamp(0.0, 1.0) * super::DOCK_STEPS).round() as u8);
+            if step != self.dock_step {
+                dock_progress(step.map(|s| s as f32 / super::DOCK_STEPS));
+                self.dock_step = step;
+            }
+            // menu del tasto destro sul Dock: le stesse voci della barra dei menu
+            if !self.dock_menu_ready {
+                self.dock_menu_ready = dock::install();
+            }
+            if dock::wants_update(st) {
+                dock::set_menu(menu(st));
+                dock::shown(st);
             }
         }
     }
@@ -440,6 +507,97 @@ mod imp {
         m
     }
 
+    /// Icona del Dock con la barra di avanzamento (None rimette l'icona normale).
+    /// `setApplicationIconImage` c'è da macOS 10.0.
+    fn dock_progress(fraction: Option<f32>) {
+        use objc2::AllocAnyThread;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::{MainThreadMarker, NSData};
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let image = fraction
+            .and_then(super::dock_icon_png)
+            .and_then(|png| NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&png)));
+        // SAFETY: immagine valida (o nessuna) sul thread principale
+        unsafe { app.setApplicationIconImage(image.as_deref()) };
+    }
+
+    /// Menu del tasto destro sul Dock. winit non lo offre: si aggiunge al delegato
+    /// dell'applicazione il metodo `applicationDockMenu:` (macOS lo chiede a ogni clic).
+    mod dock {
+        use super::super::Status;
+        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::{msg_send, sel};
+        use std::cell::RefCell;
+        use tray_icon::menu::{ContextMenu, Menu};
+
+        thread_local! {
+            static MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
+            static SHOWN: RefCell<Option<Status>> = const { RefCell::new(None) };
+        }
+
+        unsafe extern "C-unwind" fn dock_menu(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            _sender: *mut AnyObject,
+        ) -> *mut AnyObject {
+            MENU.with(|m| {
+                m.borrow()
+                    .as_ref()
+                    .map(|m| m.ns_menu() as *mut AnyObject)
+                    .unwrap_or(std::ptr::null_mut())
+            })
+        }
+
+        /// Aggiunge il metodo al delegato; false se il delegato non c'è ancora.
+        pub fn install() -> bool {
+            use objc2_app_kit::NSApplication;
+            use objc2_foundation::MainThreadMarker;
+            let Some(mtm) = MainThreadMarker::new() else {
+                return false;
+            };
+            let app = NSApplication::sharedApplication(mtm);
+            // SAFETY: `delegate` è un normale getter di NSApplication
+            let delegate: *mut AnyObject = unsafe { msg_send![&*app, delegate] };
+            if delegate.is_null() {
+                return false;
+            }
+            // SAFETY: oggetto Objective-C valido; la firma combacia con "@@:@"
+            unsafe {
+                let cls: *const AnyClass = (*delegate).class();
+                let imp: Imp = std::mem::transmute::<
+                    unsafe extern "C-unwind" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                    ) -> *mut AnyObject,
+                    Imp,
+                >(dock_menu);
+                objc2::ffi::class_addMethod(
+                    cls as *mut AnyClass,
+                    sel!(applicationDockMenu:),
+                    imp,
+                    c"@@:@".as_ptr(),
+                );
+            }
+            true
+        }
+
+        pub fn wants_update(st: &Status) -> bool {
+            SHOWN.with(|s| s.borrow().as_ref() != Some(st))
+        }
+
+        pub fn set_menu(menu: Menu) {
+            MENU.with(|m| *m.borrow_mut() = Some(menu));
+        }
+
+        pub fn shown(st: &Status) {
+            SHOWN.with(|s| *s.borrow_mut() = Some(st.clone()));
+        }
+    }
+
     /// Numero rosso sull'icona del Dock (None lo toglie). Funzione di macOS dalla 10.5.
     fn dock_badge(label: Option<&str>) {
         use objc2_app_kit::NSApplication;
@@ -500,6 +658,29 @@ mod tests {
         assert_eq!(alpha_at(&idle, 29, 6), 0);
         // la spunta non ha la freccia
         assert_eq!(alpha_at(&draw(Look::Done), 18, 6), 0);
+    }
+
+    #[test]
+    fn dock_icon_has_the_progress_bar() {
+        let px = |png: &[u8], x: u32, y: u32| {
+            image::load_from_memory(png)
+                .unwrap()
+                .to_rgba8()
+                .get_pixel(x, y)
+                .0
+        };
+        let half = dock_icon_png(0.5).unwrap();
+        let img = image::load_from_memory(&half).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 256));
+        // a sinistra bianco pieno, a destra il fondo scuro
+        assert_eq!(px(&half, 70, 227), [255, 255, 255, 255]);
+        let right = px(&half, 190, 227);
+        assert!(right[0] < 200, "fondo scuro atteso, visto {right:?}");
+        // sopra la barra l'icona non cambia
+        assert_eq!(
+            px(&half, 128, 60),
+            px(&dock_icon_png(0.0).unwrap(), 128, 60)
+        );
     }
 
     #[test]
