@@ -40,8 +40,17 @@ struct RawTorrent {
     num_seeds: u32,
     #[serde(default)]
     num_leechs: u32,
+    /// seed e peer noti nello sciame (-1 se non si sa)
+    #[serde(default = "minus_one")]
+    num_complete: i64,
+    #[serde(default = "minus_one")]
+    num_incomplete: i64,
     #[serde(default)]
     save_path: String,
+}
+
+fn minus_one() -> i64 {
+    -1
 }
 
 /// qBittorrent usa 8640000 secondi (100 giorni) per «tempo infinito».
@@ -78,7 +87,10 @@ impl From<RawTorrent> for Torrent {
             down_rate: r.dlspeed,
             up_rate: r.upspeed,
             eta: (0..ETA_INFINITE).contains(&r.eta).then_some(r.eta as u64),
-            peers: r.num_seeds + r.num_leechs,
+            seeds: r.num_seeds,
+            peers: r.num_leechs,
+            swarm_seeds: u32::try_from(r.num_complete).ok(),
+            swarm_peers: u32::try_from(r.num_incomplete).ok(),
             dir: r.save_path,
             error,
             fetching_metadata: matches!(s, "metaDL" | "forcedMetaDL"),
@@ -318,7 +330,8 @@ mod tests {
                         200,
                         r#"[{"hash":"abc","name":"artix.iso","state":"stalledDL","progress":0.5,
                             "size":2000,"completed":1000,"dlspeed":0,"upspeed":10,"eta":8640000,
-                            "num_seeds":3,"num_leechs":2,"save_path":"/d"},
+                            "num_seeds":6,"num_leechs":0,"num_complete":7,"num_incomplete":50,
+                            "save_path":"/d"},
                            {"hash":"def","name":"","state":"metaDL","progress":0,
                             "eta":-1,"save_path":"/d"},
                            {"hash":"ghi","name":"x","state":"pausedUP","progress":1,
@@ -382,7 +395,10 @@ mod tests {
         assert_eq!(l[0].status, Status::Downloading);
         assert_eq!(l[0].done_bytes, 1000);
         assert_eq!(l[0].eta, None, "8640000 vuol dire infinito");
-        assert_eq!(l[0].peers, 5);
+        // come la colonna di qBittorrent: «Seed 6 (7)», «Peer 0 (50)»
+        assert_eq!((l[0].seeds, l[0].peers), (6, 0));
+        assert_eq!((l[0].swarm_seeds, l[0].swarm_peers), (Some(7), Some(50)));
+        assert_eq!(l[1].swarm_seeds, None, "campo mancante: non si sa");
         assert!(l[1].fetching_metadata);
         assert_eq!(l[2].status, Status::Stopped);
         assert_eq!(l[2].progress, 1.0);
