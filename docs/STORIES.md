@@ -378,3 +378,10 @@ Accettazione:
 - [unit] L'avanzamento parte da 0 e arriva al totale dei brani.
 - [snap] Durante la lettura: testo «20 di 200 brani» e barra al 10%.
 Stato: fatta
+
+### S-035 Togliere i torrent completati
+Come utente, nel riquadro «Torrent» premo «Togli i completati (N)» e i torrent finiti escono dall'app
+torrent (smettono di essere condivisi); i file scaricati restano nella cartella.
+Accettazione:
+- [snap] Il pulsante compare solo se c'è almeno un torrent al 100%; dopo il clic restano quelli in corso, con «Tolti N torrent completati».
+Stato: fatta
