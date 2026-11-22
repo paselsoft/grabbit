@@ -3616,7 +3616,31 @@ impl App {
                         );
                     }
                     ui.add_space(6.0);
+                    // album su più dischi: un'intestazione per disco («Disco 2», «Bonus»)
+                    let many_discs = a
+                        .tracks
+                        .iter()
+                        .filter_map(|t| t.disc)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        > 1;
+                    let mut last_disc = None;
                     for (ti, t) in a.tracks.iter().enumerate() {
+                        if many_discs && t.disc != last_disc {
+                            last_disc = t.disc;
+                            let label = match t.disc {
+                                Some(99) => tr!("Bonus", "Bonus").to_string(),
+                                Some(n) => tr!(format!("Disco {n}"), format!("Disc {n}")),
+                                None => tr!("Altri brani", "Other tracks").to_string(),
+                            };
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(label)
+                                    .small()
+                                    .strong()
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                        }
                         let current = self.listen.now == Some((ai, ti));
                         let color = if current {
                             ACCENT_LIGHT
@@ -4258,6 +4282,18 @@ fn album_row(
                 meta.push(tracks_label(a.tracks.len()));
                 if !total.is_zero() {
                     meta.push(player::fmt_time(total));
+                }
+                let format = a.format();
+                if !format.is_empty() && !a.loose {
+                    meta.push(format.to_string());
+                }
+                // la stessa uscita c'è anche in un altro formato (copia MP3 e copia FLAC)
+                if !a.twins.is_empty() {
+                    let others = a.twins.join(", ");
+                    meta.push(tr!(
+                        format!("c'è anche in {others}"),
+                        format!("also in {others}")
+                    ));
                 }
                 ui.add(
                     egui::Label::new(

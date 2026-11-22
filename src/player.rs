@@ -36,6 +36,8 @@ pub struct Track {
     pub duration: Option<Duration>,
     /// file con un video (es. un video musicale MP4): si apre nel player video del sistema
     pub video: bool,
+    /// numero del disco (dai tag o dalla cartella «CD2»), per gli album su più dischi
+    pub disc: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -54,6 +56,8 @@ pub struct Album {
     pub tracks: Vec<Track>,
     /// copertina già rimpicciolita: larghezza, altezza, pixel RGBA
     pub cover: Option<(u32, u32, Vec<u8>)>,
+    /// formati delle altre copie dello stesso album nella libreria («FLAC» per la copia MP3)
+    pub twins: Vec<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +79,7 @@ struct ScanCache {
     files: std::collections::HashMap<PathBuf, CachedFile>,
 }
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct CachedFile {
@@ -91,6 +95,10 @@ struct CachedFile {
     album_artist: Option<String>,
     year: Option<u32>,
     has_cover: bool,
+    #[serde(default)]
+    album: Option<String>,
+    #[serde(default)]
+    disc: Option<u32>,
 }
 
 /// Dimensione e data di modifica di un file (None se non si leggono).
@@ -119,6 +127,8 @@ impl CachedFile {
             album_artist: tags.album_artist.clone(),
             year: tags.year,
             has_cover: tags.cover.is_some(),
+            album: tags.album.clone(),
+            disc: track.disc,
         }
     }
 
@@ -130,11 +140,13 @@ impl CachedFile {
             number: self.number,
             duration: self.duration_ms.map(Duration::from_millis),
             video: self.video,
+            disc: self.disc,
         };
         let tags = Tags {
             artist: self.tag_artist.clone(),
             year: self.year,
             album_artist: self.album_artist.clone(),
+            album: self.album.clone(),
             cover: None,
         };
         (track, tags)
@@ -255,6 +267,8 @@ pub fn scan_cached(
     let mut done = 0usize;
     let mut last_step = usize::MAX;
     progress(0, total);
+    let mut albums: Vec<Album> = Vec::new();
+    let mut from_tag: Vec<bool> = Vec::new();
     for (dir, depth, files) in found {
         if cancel.load(Ordering::Relaxed) {
             break;
@@ -275,6 +289,7 @@ pub fn scan_cached(
         // il file da cui viene la copertina (il primo che ne ha una), per la cache
         let mut cover_from: Option<(PathBuf, (u64, u128))> = None;
         let mut years = Vec::new();
+        let mut titles: Vec<String> = Vec::new();
         for f in files {
             done += 1;
             let step = done * 1000 / total.max(1);
@@ -314,6 +329,9 @@ pub fn scan_cached(
             if let Some(y) = tags.year {
                 years.push(y);
             }
+            if let Some(t) = tags.album.as_ref().filter(|t| !t.trim().is_empty()) {
+                titles.push(t.trim().to_string());
+            }
             if cover_from.is_none() && has_cover {
                 cover_from = st.map(|st| (f.clone(), st));
                 cover_bytes = tags.cover;
@@ -321,6 +339,27 @@ pub fn scan_cached(
             album.tracks.push(track);
         }
         album.year = album_year(&years);
+        // senza anno nei tag: quello davanti al nome della cartella («2015 - 25»)
+        if album.year.is_none() && !album.loose {
+            album.year = folder_year(&album.name);
+        }
+        // il nome dai tag dell'album («30»), non dalla cartella
+        // («Adele.-.30.(RTI).PBTHAL.(2021.-.Pop).[Flac.24-96.LP]-xpost»)
+        let tag_name = (!album.loose).then(|| common_title(&titles)).flatten();
+        let named_by_tag = tag_name.is_some();
+        if let Some(t) = tag_name {
+            album.name = t;
+        }
+        // il disco dalla cartella («CD2») per i brani che non lo dicono nei tag
+        let folder_disc = dir
+            .file_name()
+            .and_then(|n| disc_folder(&n.to_string_lossy()))
+            .filter(|_| !album.loose);
+        if folder_disc.is_some() {
+            for t in album.tracks.iter_mut().filter(|t| t.disc.is_none()) {
+                t.disc = folder_disc;
+            }
+        }
         // in «Artista/Album» (e «Artista/Album/CD1») l'artista è la cartella sotto la radice
         let artist_dir = (depth >= 2)
             .then(|| dir.strip_prefix(root).ok()?.components().next())
@@ -333,6 +372,24 @@ pub fn scan_cached(
             album.group = artist_dir.unwrap_or_else(|| primary_artist(&album.artist));
         }
         sort_tracks(&mut album.tracks);
+        // niente copertina nei brani: un'immagine nella cartella (o in quella dell'album, per
+        // «Album/CD1»), come «folder.jpg» o «cover.jpg»
+        let image = if cover_from.is_none() && !album.loose {
+            folder_image(&dir).or_else(|| folder_disc.and(dir.parent()).and_then(folder_image))
+        } else {
+            None
+        };
+        if let Some(img) = &image {
+            cover_from = stamp(img).map(|st| (img.clone(), st));
+            cover_bytes = None;
+        }
+        let read_cover = |f: &Path| -> Option<Vec<u8>> {
+            if image.as_deref() == Some(f) {
+                std::fs::read(f).ok()
+            } else {
+                read_track(f).1.cover
+            }
+        };
         album.cover = match (&cover_from, cache_dir) {
             // copertina già rimpicciolita in cache: si carica il PNG
             (Some((f, st)), Some(dir)) => {
@@ -345,7 +402,7 @@ pub fn scan_cached(
                 });
                 cached.or_else(|| {
                     // non c'è (o il file è cambiato): si legge e si salva per la prossima volta
-                    let bytes = cover_bytes.take().or_else(|| read_track(f).1.cover)?;
+                    let bytes = cover_bytes.take().or_else(|| read_cover(f))?;
                     let c = crate::search::decode_cover(&bytes, cover_px).ok()?;
                     let _ = std::fs::create_dir_all(dir.join("covers"));
                     if let Some(img) = image::RgbaImage::from_raw(c.0, c.1, c.2.clone()) {
@@ -354,11 +411,18 @@ pub fn scan_cached(
                     Some(c)
                 })
             }
-            _ => cover_bytes.and_then(|b| crate::search::decode_cover(&b, cover_px).ok()),
+            (Some((f, _)), None) => cover_bytes
+                .or_else(|| read_cover(f))
+                .and_then(|b| crate::search::decode_cover(&b, cover_px).ok()),
+            (None, _) => None,
         };
-        lib.albums.push(album);
+        albums.push(album);
+        from_tag.push(named_by_tag);
     }
+    // «Album/CD1», «Album/CD2»: un solo album, disco per disco
+    lib.albums = merge_discs(albums, from_tag, root);
     sort_albums(&mut lib.albums);
+    mark_twins(&mut lib.albums);
     // una scansione interrotta non deve buttare via la cache dei file non visti
     if let Some(dir) = cache_dir.filter(|_| !cancel.load(Ordering::Relaxed)) {
         save_cache(dir, &new);
@@ -439,12 +503,79 @@ impl Album {
     pub fn is_single(&self) -> bool {
         self.tracks.len() <= SINGLE_MAX_TRACKS
     }
+
+    /// Formato della maggior parte dei brani: «FLAC», «MP3», «M4A», «WAV», «OGG», «Video».
+    pub fn format(&self) -> &'static str {
+        let label = |t: &Track| match ext_of(&t.path).as_str() {
+            "flac" => "FLAC",
+            "mp3" => "MP3",
+            "m4a" | "mp4" | "aac" | "alac" => "M4A",
+            "wav" | "aif" | "aiff" => "WAV",
+            "ogg" | "oga" => "OGG",
+            _ if t.video => "Video",
+            _ => "",
+        };
+        let all: Vec<&'static str> = self.tracks.iter().map(label).collect();
+        all.iter()
+            .copied()
+            .max_by_key(|f| all.iter().filter(|x| *x == f).count())
+            .unwrap_or("")
+    }
+
+    fn total(&self) -> Duration {
+        self.tracks.iter().filter_map(|t| t.duration).sum()
+    }
+}
+
+/// Due album sono lo stesso disco in copie diverse (es. MP3 e FLAC)? Stesso artista, stessi
+/// brani (numero e durata quasi uguale, entro il 2% o 10 s) e nomi compatibili («19» e
+/// «19-Deluxe-Edition» sì; i due «25» da 14 e 11 brani no).
+fn same_release(a: &Album, b: &Album) -> bool {
+    if a.loose || b.loose || a.group.to_lowercase() != b.group.to_lowercase() {
+        return false;
+    }
+    if a.tracks.len() != b.tracks.len() || a.tracks.len() <= SINGLE_MAX_TRACKS {
+        return false;
+    }
+    let (ta, tb) = (a.total().as_secs_f64(), b.total().as_secs_f64());
+    if ta <= 0.0 || tb <= 0.0 || (ta - tb).abs() > (ta.max(tb) * 0.02).max(10.0) {
+        return false;
+    }
+    let (na, nb) = (match_key(&a.name), match_key(&b.name));
+    !na.is_empty() && !nb.is_empty() && (na.starts_with(&nb) || nb.starts_with(&na))
+}
+
+/// Segna in ogni album i formati delle sue altre copie nella libreria.
+fn mark_twins(albums: &mut [Album]) {
+    let n = albums.len();
+    let mut twins: Vec<Vec<&'static str>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if same_release(&albums[i], &albums[j]) {
+                let (fi, fj) = (albums[i].format(), albums[j].format());
+                twins[i].push(fj);
+                twins[j].push(fi);
+            }
+        }
+    }
+    for (a, mut t) in albums.iter_mut().zip(twins) {
+        t.sort();
+        t.dedup();
+        a.twins = t;
+    }
 }
 
 /// Ordine di «Ascolta»: artisti in ordine alfabetico (senza artista e brani sciolti in
 /// fondo); per ogni artista prima gli album poi i singoli, dal più recente.
 fn sort_albums(albums: &mut [Album]) {
-    albums.sort_by_key(|a| {
+    // a parità di nome prima la copia di qualità migliore (FLAC prima di MP3)
+    let quality = |a: &Album| match a.format() {
+        "FLAC" | "WAV" => 0,
+        "M4A" | "OGG" => 1,
+        "MP3" => 2,
+        _ => 3,
+    };
+    albums.sort_by_cached_key(|a| {
         (
             a.loose,
             a.group.is_empty(),
@@ -452,6 +583,7 @@ fn sort_albums(albums: &mut [Album]) {
             a.is_single(),
             std::cmp::Reverse(a.year.unwrap_or(0)),
             a.name.to_lowercase(),
+            quality(a),
         )
     });
 }
@@ -494,11 +626,183 @@ fn year_of(s: &str) -> Option<u32> {
 }
 
 /// Ordine dei brani: numero di traccia, poi nome del file.
+/// Ordine dei brani: disco, numero di traccia, poi nome del file.
 fn sort_tracks(tracks: &mut [Track]) {
     tracks.sort_by(|a, b| {
-        let n = |t: &Track| t.number.unwrap_or(u32::MAX);
+        let n = |t: &Track| (t.disc.unwrap_or(0), t.number.unwrap_or(u32::MAX));
         n(a).cmp(&n(b)).then_with(|| a.path.cmp(&b.path))
     });
+}
+
+/// Una cartella di un disco dentro l'album: «CD1», «CD 2», «Disc 1», «Disco 2» → il numero;
+/// «Bonus CD», «Bonus» → 99 (in fondo).
+fn disc_folder(name: &str) -> Option<u32> {
+    let s: String = name
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    for p in ["cd", "disc", "disk", "disco"] {
+        if let Some(rest) = s.strip_prefix(p) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return rest.parse().ok();
+            }
+        }
+    }
+    for p in ["bonuscd", "bonusdisc", "bonusdisk", "bonus"] {
+        if let Some(rest) = s.strip_prefix(p) {
+            if rest.chars().all(|c| c.is_ascii_digit()) {
+                return Some(99);
+            }
+        }
+    }
+    None
+}
+
+/// Immagine della copertina nella cartella dell'album, per gli album senza copertina nei
+/// brani: prima «cover», «folder», «front», «album…», poi una qualsiasi; poi le sottocartelle
+/// «Artwork», «Scans», «Covers».
+fn folder_image(dir: &Path) -> Option<PathBuf> {
+    fn images(dir: &Path) -> Vec<PathBuf> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        rd.flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let hidden = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'));
+                !hidden && p.is_file() && matches!(ext_of(p).as_str(), "jpg" | "jpeg" | "png")
+            })
+            .collect()
+    }
+    fn best(mut v: Vec<PathBuf>) -> Option<PathBuf> {
+        let rank = |p: &PathBuf| {
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            ["cover", "folder", "front", "album"]
+                .iter()
+                .position(|k| stem.starts_with(k))
+                .unwrap_or(9)
+        };
+        v.sort_by_key(|p| (rank(p), p.clone()));
+        v.into_iter().next()
+    }
+    if let Some(p) = best(images(dir)) {
+        return Some(p);
+    }
+    let rd = std::fs::read_dir(dir).ok()?;
+    let subs: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .is_some_and(|n| {
+                        matches!(n.as_str(), "artwork" | "scans" | "covers" | "images")
+                    })
+        })
+        .collect();
+    best(subs.iter().flat_map(|d| images(d)).collect())
+}
+
+/// L'anno all'inizio del nome di una cartella: «2015 - 25», «2002.Tracce» → 2015, 2002.
+fn folder_year(name: &str) -> Option<u32> {
+    let t = name.trim();
+    let digits: String = t.chars().take(4).collect();
+    let next = t.chars().nth(4);
+    (digits.len() == 4 && digits.chars().all(|c| c.is_ascii_digit()))
+        .then_some(())
+        .filter(|_| next.is_none_or(|c| !c.is_alphanumeric()))
+        .and_then(|_| year_of(&digits))
+}
+
+/// Il titolo più frequente tra quelli scritti nei tag dei brani.
+fn common_title(titles: &[String]) -> Option<String> {
+    let mut best: Option<(&String, usize)> = None;
+    for t in titles {
+        let n = titles.iter().filter(|x| *x == t).count();
+        if best.is_none_or(|(_, m)| n > m) {
+            best = Some((t, n));
+        }
+    }
+    best.map(|(t, _)| t.clone())
+}
+
+/// Unisce le cartelle dei dischi («Album/CD1», «Album/CD2», «Album/Bonus CD») nel loro album.
+/// `from_tag[i]` dice se il nome dell'album `i` viene dai tag (altrimenti è la cartella).
+fn merge_discs(albums: Vec<Album>, from_tag: Vec<bool>, root: &Path) -> Vec<Album> {
+    let mut out: Vec<Album> = Vec::new();
+    let mut named_by_tag: Vec<bool> = Vec::new();
+    let mut by_dir: std::collections::HashMap<PathBuf, usize> = Default::default();
+    // prima gli album veri, poi i dischi (così un disco trova la cartella madre se ha brani)
+    let mut pending = Vec::new();
+    for (a, t) in albums.into_iter().zip(from_tag) {
+        let disc = (!a.loose)
+            .then(|| a.dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .flatten()
+            .and_then(|n| disc_folder(&n));
+        let parent = a.dir.parent().map(Path::to_path_buf);
+        match (disc, parent) {
+            (Some(_), Some(parent)) if parent != root => pending.push((a, t, parent)),
+            _ => {
+                by_dir.insert(a.dir.clone(), out.len());
+                out.push(a);
+                named_by_tag.push(t);
+            }
+        }
+    }
+    for (disc, tag, parent) in pending {
+        let i = match by_dir.get(&parent) {
+            Some(&i) => i,
+            None => {
+                let name = if tag {
+                    disc.name.clone()
+                } else {
+                    parent
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
+                by_dir.insert(parent.clone(), out.len());
+                out.push(Album {
+                    name,
+                    dir: parent,
+                    tracks: Vec::new(),
+                    cover: None,
+                    ..disc.clone()
+                });
+                named_by_tag.push(tag);
+                out.len() - 1
+            }
+        };
+        let a = &mut out[i];
+        if !named_by_tag[i] && tag {
+            a.name = disc.name.clone();
+            named_by_tag[i] = true;
+        }
+        if a.artist.is_empty() {
+            a.artist = disc.artist.clone();
+        }
+        if a.group.is_empty() {
+            a.group = disc.group.clone();
+        }
+        a.year = match (a.year, disc.year) {
+            (Some(x), Some(y)) => Some(x.min(y)),
+            (x, y) => x.or(y),
+        };
+        if a.cover.is_none() {
+            a.cover = disc.cover;
+        }
+        a.tracks.extend(disc.tracks);
+        sort_tracks(&mut a.tracks);
+    }
+    out
 }
 
 #[derive(Default)]
@@ -506,6 +810,8 @@ struct Tags {
     artist: Option<String>,
     year: Option<u32>,
     album_artist: Option<String>,
+    /// titolo dell'album scritto nei tag
+    album: Option<String>,
     cover: Option<Vec<u8>>,
 }
 
@@ -615,6 +921,12 @@ fn read_track(path: &Path) -> (Track, Tags) {
                 Some(StandardTagKey::TrackNumber) => {
                     if let Some(n) = leading_number(&text) {
                         track.number = Some(n);
+                    }
+                }
+                Some(StandardTagKey::Album) => tags.album = Some(text),
+                Some(StandardTagKey::DiscNumber) => {
+                    if let Some(n) = leading_number(&text) {
+                        track.disc = Some(n);
                     }
                 }
                 _ => {}
@@ -1344,6 +1656,11 @@ mod tests {
 
     /// MP3 minimo (qualche fotogramma di silenzio) con una copertina PNG 4×4 rossa nell'ID3.
     fn mp3_with_cover(path: &Path) {
+        mp3(path, true, None);
+    }
+
+    /// MP3 minimo con, a scelta, la copertina e il titolo dell'album (TALB) nell'ID3.
+    fn mp3(path: &Path, cover: bool, album: Option<&str>) {
         let mut png = Vec::new();
         image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 30, 30, 255]))
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -1354,10 +1671,21 @@ mod tests {
         apic.push(3);
         apic.push(0);
         apic.extend_from_slice(&png);
-        let mut frames = b"APIC".to_vec();
-        frames.extend_from_slice(&(apic.len() as u32).to_be_bytes());
-        frames.extend_from_slice(&[0, 0]);
-        frames.extend_from_slice(&apic);
+        let mut frames = Vec::new();
+        let mut frame = |id: &[u8], body: &[u8]| {
+            frames.extend_from_slice(id);
+            frames.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            frames.extend_from_slice(&[0, 0]);
+            frames.extend_from_slice(body);
+        };
+        if cover {
+            frame(b"APIC", &apic);
+        }
+        if let Some(a) = album {
+            let mut talb = vec![0u8];
+            talb.extend_from_slice(a.as_bytes());
+            frame(b"TALB", &talb);
+        }
         let n = frames.len() as u32;
         let syncsafe = [
             ((n >> 21) & 0x7f) as u8,
@@ -1374,6 +1702,109 @@ mod tests {
             b.extend_from_slice(&[0u8; 413]);
         }
         std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn mp3_and_flac_copies_are_twins() {
+        let al = |name: &str, ext: &str, n: usize, secs: u64| Album {
+            name: name.into(),
+            group: "Alessandra Amoroso".into(),
+            tracks: (0..n)
+                .map(|i| Track {
+                    path: PathBuf::from(format!("{name}/{i}.{ext}")),
+                    duration: Some(Duration::from_secs(secs)),
+                    ..Track::default()
+                })
+                .collect(),
+            ..Album::default()
+        };
+        let mut v = vec![
+            al("Tutto accade", "flac", 14, 204),
+            al("Tutto accade", "mp3", 14, 204),
+            al("19-Deluxe-Edition", "flac", 22, 216),
+            al("19", "mp3", 22, 215),
+            al("25", "flac", 14, 260),
+            al("25", "mp3", 11, 265),
+        ];
+        mark_twins(&mut v);
+        assert_eq!(v[0].format(), "FLAC");
+        assert_eq!(v[0].twins, ["MP3"]);
+        assert_eq!(v[1].twins, ["FLAC"]);
+        assert_eq!(v[2].twins, ["MP3"]);
+        assert_eq!(v[3].twins, ["FLAC"]);
+        assert!(
+            v[4].twins.is_empty() && v[5].twins.is_empty(),
+            "edizioni diverse"
+        );
+    }
+
+    #[test]
+    fn disc_folders_are_recognized() {
+        assert_eq!(disc_folder("CD1"), Some(1));
+        assert_eq!(disc_folder("CD 2"), Some(2));
+        assert_eq!(disc_folder("Disc 3"), Some(3));
+        assert_eq!(disc_folder("disco_1"), Some(1));
+        assert_eq!(disc_folder("Bonus CD"), Some(99));
+        assert_eq!(disc_folder("Bonus"), Some(99));
+        assert_eq!(disc_folder("CD"), None);
+        assert_eq!(disc_folder("21"), None);
+        assert_eq!(disc_folder("Cdrom live"), None);
+        assert_eq!(folder_year("2015 - 25"), Some(2015));
+        assert_eq!(folder_year("2002.Tracce"), Some(2002));
+        assert_eq!(folder_year("1999"), Some(1999));
+        assert_eq!(folder_year("25"), None);
+        assert_eq!(folder_year("2015abc"), None);
+        assert_eq!(folder_year("5000 - Futuro"), None);
+    }
+
+    /// Nomi dai tag, dischi uniti nel loro album, copertina da «folder.jpg».
+    #[test]
+    fn albums_are_named_merged_and_get_folder_covers() {
+        let root = std::env::temp_dir().join(format!("grabbit-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let artist = root.join("Adele");
+        // nome della cartella scomposto, titolo vero nei tag
+        let thirty = artist.join("Adele.-.30.(RTI).PBTHAL.(2021.-.Pop).[Flac.24-96.LP]-xpost");
+        std::fs::create_dir_all(&thirty).unwrap();
+        mp3(&thirty.join("1 - Strangers.mp3"), true, Some("30"));
+        // due dischi e un bonus, senza copertina nei brani ma con folder.jpg nell'album
+        let nineteen = artist.join("Adele-19-Deluxe.Edition-2CD-FLAC-2008-WRE");
+        for (d, n) in [
+            ("CD2", "1 - Secondo"),
+            ("CD1", "1 - Primo"),
+            ("Bonus CD", "1 - Extra"),
+        ] {
+            std::fs::create_dir_all(nineteen.join(d)).unwrap();
+            mp3(
+                &nineteen.join(d).join(format!("{n}.mp3")),
+                false,
+                Some("19"),
+            );
+        }
+        image::RgbImage::from_pixel(8, 8, image::Rgb([20, 200, 40]))
+            .save(nineteen.join("folder.jpg"))
+            .unwrap();
+        // senza titolo nei tag resta il nome della cartella
+        let plain = artist.join("2015 - 25");
+        std::fs::create_dir_all(&plain).unwrap();
+        mp3(&plain.join("1 - Hello.mp3"), false, None);
+
+        let lib = scan(&root, 16, &AtomicBool::new(false));
+        let names: Vec<&str> = lib.albums.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(lib.albums.len(), 3, "{names:?}");
+        assert!(names.contains(&"30") && names.contains(&"19") && names.contains(&"2015 - 25"));
+        let a19 = lib.albums.iter().find(|a| a.name == "19").unwrap();
+        let titles: Vec<&str> = a19.tracks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Primo", "Secondo", "Extra"],
+            "disco per disco, il bonus in fondo"
+        );
+        assert_eq!(a19.dir, nineteen);
+        assert_eq!(a19.group, "Adele");
+        let c = a19.cover.as_ref().expect("copertina da folder.jpg");
+        assert!(c.2[1] > 150 && c.2[0] < 100, "verde: {:?}", &c.2[..4]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// La seconda scansione non riapre i file (stesso risultato, copertina dalla cache);

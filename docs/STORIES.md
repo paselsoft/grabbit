@@ -393,3 +393,40 @@ Accettazione:
 - [unit] qBittorrent: num_seeds/num_leechs e num_complete/num_incomplete; Transmission: peersSendingToUs, peersConnected e trackerStats (il conteggio più alto, -1 = non si sa).
 - [snap] Riga con «seed 6 (7) · peer 0 (50)».
 Stato: fatta
+
+## Milestone 13: libreria più ordinata (0.15.0)
+
+S-037, S-038, S-039
+
+### S-037 Copertine dalla cartella dell'album
+Come utente, un album senza copertina nei brani prende l'immagine della sua cartella (`folder.jpg`,
+`cover.jpg`, `front.jpg`…, anche in «Artwork» o «Scans», o nella cartella dell'album per «CD1»).
+Accettazione:
+- [unit] Album con due dischi e `folder.jpg` nella cartella madre: copertina presente.
+- [snap] «2015 - 25» con `cover.jpg` mostra la copertina.
+Stato: fatta
+
+### S-038 Nomi degli album dai tag
+Come utente, «Adele.-.30.(RTI).PBTHAL.(2021.-.Pop).[Flac.24-96.LP]-xpost» si chiama «30», il titolo
+scritto nei tag; senza titolo nei tag resta il nome della cartella, e l'anno davanti al nome
+(«2015 - 25») vale se i tag non hanno l'anno.
+Accettazione:
+- [unit] Titolo più frequente tra i brani; cartella se manca; anno dalla cartella.
+Stato: fatta
+
+### S-039 Album su più dischi
+Come utente, «Album/CD1», «Album/CD2» e «Album/Bonus CD» sono un solo album, con i brani disco per
+disco (il bonus in fondo) e le intestazioni «Disco 1», «Disco 2», «Bonus».
+Accettazione:
+- [unit] Cartelle dei dischi riconosciute («CD1», «CD 2», «Disc 3», «Disco 1», «Bonus CD»); un album con i brani in ordine.
+- [snap] Vista dell'album con «Disco 1» e «Disco 2».
+Stato: fatta
+
+### S-040 Formato degli album e copie doppie
+Come utente che ha alcuni album sia in MP3 sia in FLAC, vedo il formato di ogni album
+(«2021 · 14 brani · 47:40 · FLAC») e sulla copia doppia «c'è anche in MP3» / «c'è anche in FLAC»;
+a parità di nome la copia FLAC viene prima.
+Accettazione:
+- [unit] Copie dello stesso disco: stesso artista, stessi brani (numero e durata entro il 2% o 10 s), nomi compatibili («19» e «19-Deluxe-Edition»); due edizioni diverse («25» da 14 e da 11 brani) no.
+- [snap] «Tutto accade» in MP3 e FLAC con le due scritte.
+Stato: fatta
