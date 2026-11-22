@@ -324,3 +324,22 @@ Accettazione:
 - [unit] I link si dividono in video e musica, torrent, file diretti; le ricerche restano a yt-dlp.
 - [snap] Magnet incollato in «Scarica»: si apre «File» con «Aggiunto a Transmission: <nome>».
 Stato: fatta
+
+## Milestone 12: ascolto più comodo, licenze, Grabbit in secondo piano (0.14.0)
+
+S-029, S-030, S-031, S-032
+
+### S-029 Artisti chiusi in «Ascolta»
+Come utente con una libreria grande, in «Ascolta» vedo l'elenco degli artisti chiusi e apro con la
+freccia solo quello che mi interessa; mentre cerco, i gruppi trovati restano aperti.
+Accettazione:
+- [snap] Dopo la lettura della cartella si vedono solo «Artista · N uscite»; la freccia apre gli album.
+Stato: fatta
+
+### S-030 Mini player
+Come utente che ascolta musica, con «Mini player» la finestra si riduce alla sola barra del player;
+con «Mostra tutto» torna com'era.
+Accettazione:
+- [snap] La finestra diventa alta quanto la barra, con «Mostra tutto»; poi torna alla grandezza di prima.
+- [snap] Se non c'è più niente in ascolto, torna da sola la finestra intera.
+Stato: fatta
