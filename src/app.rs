@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 mod dm_tab;
+mod menubar_glue;
 mod torrent_tab;
 
 // Tema scuro con accento arancione.
@@ -284,6 +285,9 @@ pub struct App {
     torrents: torrent_tab::TorrentUi,
     /// la scheda «File» è aperta: l'elenco dei torrent si rilegge spesso
     torrent_watch: Arc<AtomicBool>,
+    /// icona nella barra dei menu e numero sul Dock (solo Mac)
+    menubar: crate::menubar::MenuBar,
+    menubar_ui: menubar_glue::MenuBarUi,
 }
 
 impl App {
@@ -343,6 +347,11 @@ impl App {
             torrent_tx: channel().0,
             torrents: Default::default(),
             torrent_watch: Arc::new(AtomicBool::new(false)),
+            menubar: {
+                let ctx = cc.egui_ctx.clone();
+                crate::menubar::MenuBar::new(move || ctx.request_repaint())
+            },
+            menubar_ui: Default::default(),
         };
         {
             let (ttx, trx) = channel();
@@ -444,12 +453,25 @@ impl App {
     }
 
     fn start_download(&mut self, ctx: &egui::Context) {
-        let mut inputs: Vec<String> = self
+        let lines: Vec<String> = self
             .input
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        // yt-dlp non scarica torrent né file diretti: vanno dove li sanno scaricare
+        let (mut inputs, torrents, files) = split_inputs(lines);
+        if !torrents.is_empty() || !files.is_empty() {
+            self.route_elsewhere(torrents, files);
+            // nel campo restano solo i link per yt-dlp, così non si rimandano due volte
+            self.input = inputs.join("\n");
+            if inputs.is_empty() {
+                self.custom_name.clear();
+                return;
+            }
+            // c'è anche altro da scaricare qui: si resta su «Scarica»
+            self.tab = Tab::Download;
+        }
         // un solo link con un nome scelto: il file si chiamerà così
         let name = self.custom_name.trim().to_string();
         if inputs.len() == 1 && !name.is_empty() {
@@ -457,6 +479,39 @@ impl App {
         }
         self.custom_name.clear();
         self.start_jobs(ctx, inputs);
+    }
+
+    /// Magnet e .torrent all'app torrent, file diretti alla scheda «File»; si apre «File».
+    fn route_elsewhere(&mut self, torrents: Vec<String>, files: Vec<String>) {
+        let mut said = Vec::new();
+        if !torrents.is_empty() {
+            let app = self.cfg.torrent_app.label();
+            said.push(tr!(
+                format!("{} torrent mandati a {app} (scheda «File»)", torrents.len()),
+                format!("{} torrents sent to {app} (Files tab)", torrents.len())
+            ));
+            self.add_torrents(torrents);
+        }
+        if !files.is_empty() {
+            let q = self.dm_ui.queue;
+            let n = self.dm.add(
+                &files.join("\n"),
+                &self.cfg.dm_dir,
+                q,
+                self.cfg.dm_connections,
+            );
+            if n > 0 {
+                self.dm.start_queue(q);
+            }
+            said.push(tr!(
+                format!("{n} file aggiunti alla scheda «File»"),
+                format!("{n} files added to the Files tab")
+            ));
+        }
+        for s in said {
+            self.log.push(s);
+        }
+        self.tab = Tab::Files;
     }
 
     /// Avvia il download dei link indicati, con le opzioni scelte (Video/Audio, formato…).
@@ -967,6 +1022,7 @@ impl App {
                 Event::Finished => {
                     self.running = false;
                     self.notify_finished(ctx);
+                    self.menubar_finished();
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
                     // la libreria già letta (o «Già nella libreria» nei risultati) si aggiorna
@@ -996,6 +1052,7 @@ impl eframe::App for App {
         self.player_tick(ctx);
         self.update_title(ctx);
         self.check_clipboard(ctx);
+        self.menubar_tick(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1859,8 +1916,8 @@ impl App {
                     .desired_rows(3)
                     .desired_width(f32::INFINITY)
                     .hint_text(tr!(
-                        "Incolla qui uno o più link YouTube o Spotify, uno per riga (Ctrl+V)",
-                        "Paste one or more YouTube or Spotify links here, one per line (Ctrl+V)"
+                        "Incolla qui uno o più link YouTube o Spotify, uno per riga (Ctrl+V). Magnet e .torrent vanno all'app torrent",
+                        "Paste one or more YouTube or Spotify links here, one per line (Ctrl+V). Magnets and .torrent files go to the torrent app"
                     )),
             );
             let resp = match link_label {
@@ -2543,6 +2600,7 @@ impl App {
         if !gained {
             return;
         }
+        self.menubar_seen();
         let Some(text) = arboard::Clipboard::new()
             .ok()
             .and_then(|mut c| c.get_text().ok())
@@ -4267,6 +4325,21 @@ fn notify(title: &str, body: &str) {
     }
 }
 
+/// Divide i link incollati in «Scarica»: (video e musica, torrent, file diretti).
+fn split_inputs(lines: Vec<String>) -> (Vec<String>, Vec<String>, Vec<String>) {
+    use crate::menubar::{link_kind, LinkKind};
+    let (mut media, mut torrents, mut files) = (Vec::new(), Vec::new(), Vec::new());
+    for l in lines {
+        match link_kind(&l) {
+            Some((LinkKind::Torrent, link)) => torrents.push(link),
+            Some((LinkKind::File, link)) => files.push(link),
+            // video, musica e tutto il resto (anche le ricerche) restano a yt-dlp
+            _ => media.push(l),
+        }
+    }
+    (media, torrents, files)
+}
+
 /// Il link negli appunti, se è un solo link YouTube, YouTube Music o Spotify.
 fn copied_link(text: &str) -> Option<String> {
     let t = text.trim();
@@ -4457,6 +4530,20 @@ fn configure_style(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn torrents_and_files_pasted_in_download_go_elsewhere() {
+        let magnet = "magnet:?xt=urn:btih:d9ce&dn=Sal%20Da%20Vinci";
+        let (media, torrents, files) = split_inputs(vec![
+            "https://youtu.be/abc".into(),
+            magnet.into(),
+            "https://ftp.crifo.org/artix/iso/artix.iso".into(),
+            "ytsearch:Adele Hello".into(),
+        ]);
+        assert_eq!(media, ["https://youtu.be/abc", "ytsearch:Adele Hello"]);
+        assert_eq!(torrents, [magnet]);
+        assert_eq!(files, ["https://ftp.crifo.org/artix/iso/artix.iso"]);
+    }
 
     #[test]
     fn copied_links_are_recognised() {
