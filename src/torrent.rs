@@ -1,19 +1,51 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Torrent e link magnet tramite Transmission già installato sul Mac.
+//! Torrent e link magnet tramite Transmission o qBittorrent già installati sul Mac.
 //!
 //! Grabbit non contiene un motore torrent (libtorrent in C++ non parte su High Sierra):
 //! comanda Transmission con la sua interfaccia remota (Preferenze › Remoto › «Abilita accesso
-//! remoto», porta 9091). Se Transmission non risponde, il link si apre con l'app predefinita.
+//! remoto», porta 9091) e qBittorrent con la sua interfaccia web (porta 8080). Se l'app scelta
+//! non risponde, il link si apre con l'app predefinita per i torrent.
 use crate::tr;
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod qbit;
+pub use qbit::{QBittorrent, DEFAULT_PORT as QBIT_PORT};
+
 pub const DEFAULT_PORT: u16 = 9091;
+
+/// L'app torrent che fa il lavoro.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum App {
+    #[default]
+    Transmission,
+    QBittorrent,
+}
+
+impl App {
+    pub const ALL: [App; 2] = [App::Transmission, App::QBittorrent];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            App::Transmission => "Transmission",
+            App::QBittorrent => "qBittorrent",
+        }
+    }
+
+    /// Apre l'app (solo Mac).
+    pub fn launch(self) {
+        if cfg!(target_os = "macos") {
+            let _ = std::process::Command::new("open")
+                .args(["-a", self.label()])
+                .spawn();
+        }
+    }
+}
 
 /// Un magnet, un indirizzo che finisce in .torrent o un file .torrent sul disco.
 pub fn is_torrent_source(s: &str) -> bool {
@@ -25,7 +57,7 @@ pub fn is_torrent_source(s: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".torrent")
 }
 
-/// Stato di un torrent come lo vede Transmission.
+/// Stato di un torrent, uguale per le due app.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Status {
     Stopped,
@@ -37,7 +69,9 @@ pub enum Status {
 
 #[derive(Clone, Debug)]
 pub struct Torrent {
-    pub id: i64,
+    pub app: App,
+    /// numero in Transmission, hash in qBittorrent
+    pub id: String,
     pub name: String,
     pub status: Status,
     /// 0–1
@@ -99,7 +133,8 @@ impl From<RawTorrent> for Torrent {
             _ => Status::Stopped,
         };
         Torrent {
-            id: r.id,
+            app: App::Transmission,
+            id: r.id.to_string(),
             name: r.name,
             status,
             progress: r.percent_done.clamp(0.0, 1.0) as f32,
@@ -325,15 +360,6 @@ pub fn open_with_default_app(source: &str) -> std::io::Result<()> {
     cmd.arg(source.trim()).spawn().map(|_| ())
 }
 
-/// Apre Transmission (solo Mac).
-pub fn launch_transmission() {
-    if cfg!(target_os = "macos") {
-        let _ = std::process::Command::new("open")
-            .args(["-a", "Transmission"])
-            .spawn();
-    }
-}
-
 fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -359,22 +385,26 @@ fn base64(data: &[u8]) -> String {
 
 // ───────────────────────────── lavoratore in sottofondo ─────────────────────────────
 
-/// Comandi dall'interfaccia: le chiamate a Transmission non bloccano mai la finestra.
+/// Comandi dall'interfaccia: le chiamate alle app non bloccano mai la finestra.
 pub enum Cmd {
-    Add(Vec<String>, std::path::PathBuf),
-    Pause(i64),
-    Resume(i64),
-    Remove(i64),
+    Add(Vec<String>, std::path::PathBuf, App),
+    Pause(App, String),
+    Resume(App, String),
+    Remove(App, String),
+    /// vale per tutte e due le app (quella spenta si ignora)
     SpeedLimit(u32),
     Refresh,
 }
 
+/// Elenco di ogni app, oppure il motivo per cui non risponde.
+pub type AppLists = Vec<(App, Result<Vec<Torrent>, String>)>;
+
 /// Notizie per l'interfaccia.
 pub enum Update {
-    /// elenco aggiornato, oppure Transmission non risponde (con il motivo)
-    List(Result<Vec<Torrent>, String>),
-    /// esito dell'aggiunta: (aggiunti a Transmission, aperti con l'app predefinita, errori)
+    List(AppLists),
+    /// esito dell'aggiunta: (aggiunti all'app, aperti con l'app predefinita, errori)
     Added {
+        app: App,
         added: Vec<String>,
         opened: usize,
         errors: Vec<String>,
@@ -382,16 +412,67 @@ pub enum Update {
     Error(String),
 }
 
-/// Avvia il lavoratore. Rilegge l'elenco ogni 2 s mentre `watching()` è vero (scheda «File»
+/// Le due app con la stessa interfaccia.
+struct Clients {
+    tm: Transmission,
+    qb: QBittorrent,
+}
+
+impl Clients {
+    fn add(&self, app: App, source: &str, dir: &Path) -> Result<String> {
+        match app {
+            App::Transmission => self.tm.add(source, dir),
+            App::QBittorrent => self.qb.add(source, dir),
+        }
+    }
+
+    fn list(&self, app: App) -> Result<Vec<Torrent>> {
+        match app {
+            App::Transmission => self.tm.list(),
+            App::QBittorrent => self.qb.list(),
+        }
+    }
+
+    fn act(&self, cmd: &Cmd) -> Result<()> {
+        let tm_id = |id: &str| {
+            id.parse::<i64>()
+                .map_err(|_| anyhow!("id non valido: {id}"))
+        };
+        match cmd {
+            Cmd::Pause(App::Transmission, id) => self.tm.pause(tm_id(id)?),
+            Cmd::Resume(App::Transmission, id) => self.tm.resume(tm_id(id)?),
+            Cmd::Remove(App::Transmission, id) => self.tm.remove(tm_id(id)?),
+            Cmd::Pause(App::QBittorrent, id) => self.qb.pause(id),
+            Cmd::Resume(App::QBittorrent, id) => self.qb.resume(id),
+            Cmd::Remove(App::QBittorrent, id) => self.qb.remove(id),
+            Cmd::SpeedLimit(k) => {
+                // un errore vero di una delle due app si mostra; un'app spenta no
+                let a = self.tm.set_speed_limit(*k);
+                let b = self.qb.set_speed_limit(*k);
+                [a, b]
+                    .into_iter()
+                    .find(|r| r.as_ref().is_err_and(|e| !is_not_running(e)))
+                    .unwrap_or(Ok(()))
+            }
+            Cmd::Add(..) | Cmd::Refresh => Ok(()),
+        }
+    }
+}
+
+/// Avvia il lavoratore. Rilegge gli elenchi ogni 2 s mentre `watching()` è vero (scheda «File»
 /// aperta o torrent in corso), altrimenti ogni 30 s.
 pub fn spawn(
-    port: u16,
+    tm_port: u16,
+    qb_port: u16,
     rx: Receiver<Cmd>,
     watching: impl Fn() -> bool + Send + 'static,
     send: impl Fn(Update) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let tm = Transmission::new(port);
+        let c = Clients {
+            tm: Transmission::new(tm_port),
+            qb: QBittorrent::new(qb_port),
+        };
         let mut active = false;
         let mut last: Option<std::time::Instant> = None;
         loop {
@@ -412,12 +493,12 @@ pub fn spawn(
                 }
             };
             match cmd {
-                Some(Cmd::Add(sources, dir)) => {
+                Some(Cmd::Add(sources, dir, app)) => {
                     let (mut added, mut opened, mut errors) = (Vec::new(), 0, Vec::new());
                     for s in sources {
-                        match tm.add(&s, &dir) {
+                        match c.add(app, &s, &dir) {
                             Ok(name) => added.push(name),
-                            // Transmission spento: ci pensa l'app predefinita per i torrent
+                            // l'app è spenta: ci pensa l'app predefinita per i torrent
                             Err(e) if is_not_running(&e) => match open_with_default_app(&s) {
                                 Ok(()) => opened += 1,
                                 Err(e2) => errors.push(format!("{e:#} ({e2})")),
@@ -426,31 +507,37 @@ pub fn spawn(
                         }
                     }
                     send(Update::Added {
+                        app,
                         added,
                         opened,
                         errors,
                     });
                 }
-                Some(Cmd::Pause(id)) => report(&send, tm.pause(id)),
-                Some(Cmd::Resume(id)) => report(&send, tm.resume(id)),
-                Some(Cmd::Remove(id)) => report(&send, tm.remove(id)),
-                Some(Cmd::SpeedLimit(k)) => report(&send, tm.set_speed_limit(k)),
-                Some(Cmd::Refresh) | None => {}
+                Some(cmd) => report(&send, c.act(&cmd)),
+                None => {}
             }
             last = Some(std::time::Instant::now());
-            let list = tm.list().map_err(|e| format!("{e:#}"));
-            active = list.as_ref().is_ok_and(|l| {
-                l.iter()
-                    .any(|t| t.status != Status::Stopped && t.progress < 1.0)
+            let lists: Vec<_> = App::ALL
+                .into_iter()
+                .map(|app| (app, c.list(app).map_err(|e| format!("{e:#}"))))
+                .collect();
+            active = lists.iter().any(|(_, l)| {
+                l.as_ref().is_ok_and(|l| {
+                    l.iter()
+                        .any(|t| t.status != Status::Stopped && t.progress < 1.0)
+                })
             });
-            send(Update::List(list));
+            send(Update::List(lists));
         }
     });
 }
 
-fn is_not_running(e: &anyhow::Error) -> bool {
-    let m = format!("{e:#}");
+pub fn is_not_running_text(m: &str) -> bool {
     m.contains("non risponde") || m.contains("does not respond")
+}
+
+fn is_not_running(e: &anyhow::Error) -> bool {
+    is_not_running_text(&format!("{e:#}"))
 }
 
 fn report(send: &impl Fn(Update), r: Result<()>) {

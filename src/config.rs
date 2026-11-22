@@ -78,6 +78,10 @@ pub struct Config {
     pub speed_limit_kbps: u32,
     /// porta dell'accesso remoto di Transmission (Preferenze › Remoto)
     pub transmission_port: u16,
+    /// porta dell'interfaccia web di qBittorrent
+    pub qbittorrent_port: u16,
+    /// app a cui vanno i nuovi magnet e .torrent
+    pub torrent_app: crate::torrent::App,
 }
 
 impl Default for Config {
@@ -99,6 +103,8 @@ impl Default for Config {
             dm_connections: 8,
             speed_limit_kbps: 0,
             transmission_port: crate::torrent::DEFAULT_PORT,
+            qbittorrent_port: crate::torrent::QBIT_PORT,
+            torrent_app: Default::default(),
             out_dir,
             video_dir,
             site_folders: true,

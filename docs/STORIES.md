@@ -277,3 +277,17 @@ Accettazione:
 - [snap] Riquadro «Torrent» con righe (barra, velocità, peer) e stato «Transmission non risponde».
 - [manual] Sul Mac, un magnet di una distribuzione Linux.
 Stato: fatta
+
+## Milestone 10: torrent anche con qBittorrent (0.12.0)
+
+S-025
+
+### S-025 qBittorrent nel riquadro «Torrent»
+Come utente che usa anche qBittorrent, scelgo «Aggiungi a: Transmission / qBittorrent» e vedo nello
+stesso riquadro i torrent di tutte e due le app, ognuno con il nome della sua app.
+Accettazione:
+- [unit] Con un finto qBittorrent: magnet e cartella in multipart, file .torrent caricato, elenco (stati, tempo infinito, peer), «stop»/«start» con ripiego su «pause»/«resume» (qBittorrent 4), «Togli» senza cancellare i file, limite in byte/s.
+- [unit] Password richiesta (403): messaggio con «Salta autenticazione per i client in localhost».
+- [snap] Righe delle due app insieme con l'etichetta dell'app; l'app non scelta e chiusa non mostra avvisi.
+- [manual] Sul Mac, un magnet aggiunto a qBittorrent.
+Stato: fatta

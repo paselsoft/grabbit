@@ -62,6 +62,7 @@ mod tests {
             ("app/dm_tab.rs", include_str!("app/dm_tab.rs")),
             ("app/torrent_tab.rs", include_str!("app/torrent_tab.rs")),
             ("torrent.rs", include_str!("torrent.rs")),
+            ("torrent/qbit.rs", include_str!("torrent/qbit.rs")),
             ("dm.rs", include_str!("dm.rs")),
             ("logins.rs", include_str!("logins.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
