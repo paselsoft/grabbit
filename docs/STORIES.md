@@ -352,3 +352,12 @@ Accettazione:
 - [unit] Ogni libreria di Cargo.lock è in `assets/licenses.txt` (generato da `scripts/licenses.py`).
 - [snap] Finestra con le sezioni, i link e l'elenco per licenza; «Chiudi» o Esc la chiudono.
 Stato: fatta
+
+### S-032 Grabbit in secondo piano a finestra chiusa (Mac)
+Come utente del Mac, chiudendo la finestra Grabbit resta nella barra dei menu e i download continuano;
+la riapro da «Apri Grabbit» o cliccando l'icona nel Dock, ed esco con «Esci da Grabbit» o Cmd+Q.
+Accettazione:
+- [ci] Compila per macOS (`applicationShouldHandleReopen:hasVisibleWindows:` aggiunto al delegato di winit).
+- [manual] Sul Mac: chiusura con il pallino rosso (notifica la prima volta), download che continua, riapertura dal menu e dal Dock, «Esci da Grabbit».
+- [manual] Opzioni avanzate › «Chiudendo la finestra resta nella barra dei menu» spenta: Grabbit si chiude come prima.
+Stato: fatta

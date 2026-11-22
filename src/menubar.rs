@@ -364,6 +364,11 @@ mod imp {
             }
         }
 
+        /// L'icona nella barra dei menu c'è (quindi Grabbit può restare in secondo piano).
+        pub fn available(&self) -> bool {
+            self.tray.is_some()
+        }
+
         pub fn actions(&mut self) -> Vec<Action> {
             self.rx
                 .try_iter()
@@ -528,7 +533,8 @@ mod imp {
     /// dell'applicazione il metodo `applicationDockMenu:` (macOS lo chiede a ogni clic).
     mod dock {
         use super::super::Status;
-        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::encode::Encode;
+        use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
         use objc2::{msg_send, sel};
         use std::cell::RefCell;
         use tray_icon::menu::{ContextMenu, Menu};
@@ -551,7 +557,33 @@ mod imp {
             })
         }
 
-        /// Aggiunge il metodo al delegato; false se il delegato non c'è ancora.
+        /// Clic sull'icona del Dock con la finestra nascosta (Grabbit in secondo piano): la
+        /// rimostra. winit non gestisce `applicationShouldHandleReopen:hasVisibleWindows:`.
+        unsafe extern "C-unwind" fn reopen(
+            _this: *mut AnyObject,
+            _cmd: Sel,
+            sender: *mut AnyObject,
+            has_visible: Bool,
+        ) -> Bool {
+            if !has_visible.as_bool() && !sender.is_null() {
+                // SAFETY: `sender` è NSApplication; `windows` è un NSArray di NSWindow
+                unsafe {
+                    let windows: *mut AnyObject = msg_send![sender, windows];
+                    if !windows.is_null() {
+                        let n: usize = msg_send![windows, count];
+                        for i in 0..n {
+                            let w: *mut AnyObject = msg_send![windows, objectAtIndex: i];
+                            if !w.is_null() {
+                                let _: () = msg_send![w, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+                            }
+                        }
+                    }
+                }
+            }
+            Bool::YES
+        }
+
+        /// Aggiunge i metodi al delegato; false se il delegato non c'è ancora.
         pub fn install() -> bool {
             use objc2_app_kit::NSApplication;
             use objc2_foundation::MainThreadMarker;
@@ -580,6 +612,19 @@ mod imp {
                     sel!(applicationDockMenu:),
                     imp,
                     c"@@:@".as_ptr(),
+                );
+                let imp: Imp = std::mem::transmute::<
+                    unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool,
+                    Imp,
+                >(reopen);
+                // BOOL è "c" sui Mac Intel e "B" su Apple Silicon
+                let b = Bool::ENCODING.to_string();
+                let types = std::ffi::CString::new(format!("{b}@:@{b}")).expect("firma");
+                objc2::ffi::class_addMethod(
+                    cls as *mut AnyClass,
+                    sel!(applicationShouldHandleReopen:hasVisibleWindows:),
+                    imp,
+                    types.as_ptr(),
                 );
             }
             true
@@ -621,6 +666,10 @@ mod imp {
     impl MenuBar {
         pub fn new(_wake: impl Fn() + Send + Sync + 'static) -> Self {
             MenuBar
+        }
+
+        pub fn available(&self) -> bool {
+            false
         }
 
         pub fn actions(&mut self) -> Vec<Action> {

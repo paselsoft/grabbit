@@ -134,6 +134,28 @@ impl App {
         }
     }
 
+    /// Mac: chiudendo la finestra Grabbit si nasconde e resta nella barra dei menu, così i
+    /// download continuano; la prima volta lo dice con una notifica.
+    pub(super) fn keep_in_background(&mut self, ctx: &egui::Context) {
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if !closing || self.quitting || !self.cfg.stay_in_menubar || !self.menubar.available() {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        if !self.cfg.told_menubar {
+            self.cfg.told_menubar = true;
+            self.cfg.save();
+            notify(
+                "Grabbit",
+                tr!(
+                    "Grabbit resta nella barra dei menu: per uscire usa «Esci da Grabbit» o Cmd+Q",
+                    "Grabbit stays in the menu bar: to quit use “Quit Grabbit” or Cmd+Q"
+                ),
+            );
+        }
+    }
+
     fn show_window(ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -145,7 +167,10 @@ impl App {
         match a {
             Action::OpenApp => Self::show_window(ctx),
             Action::OpenFolder => open_folder(&self.save_dir().clone()),
-            Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Action::Quit => {
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             Action::SpeedLimit(k) => {
                 self.cfg.speed_limit_kbps = k;
                 if k > 0 {

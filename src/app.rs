@@ -282,6 +282,8 @@ pub struct App {
     mini: Option<egui::Vec2>,
     /// finestra «Licenze e crediti» aperta
     show_credits: bool,
+    /// «Esci da Grabbit»: la chiusura non va trattenuta nella barra dei menu
+    quitting: bool,
     /// scheda «File»: download manager dei file (code, pianificazione, limite)
     dm: crate::dm::Manager,
     dm_ui: dm_tab::DmUi,
@@ -345,6 +347,7 @@ impl App {
             login_notice: None,
             mini: None,
             show_credits: false,
+            quitting: false,
             dm: {
                 let ctx = cc.egui_ctx.clone();
                 let state = tools::project_dirs().map(|d| d.config_dir().join("downloads.json"));
@@ -1060,6 +1063,7 @@ impl eframe::App for App {
         self.update_title(ctx);
         self.check_clipboard(ctx);
         self.menubar_tick(ctx);
+        self.keep_in_background(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2209,6 +2213,14 @@ impl App {
                         "A track already downloaded in the same format is not downloaded again, as long as the file exists."
                     ));
                 ui.checkbox(&mut self.cfg.auto_update_app, tr!("Installa automaticamente gli aggiornamenti di Grabbit", "Install Grabbit updates automatically"));
+                if cfg!(target_os = "macos")
+                    && ui
+                        .checkbox(&mut self.cfg.stay_in_menubar, tr!("Chiudendo la finestra resta nella barra dei menu", "Stay in the menu bar when the window is closed"))
+                        .on_hover_text(tr!("I download continuano; per uscire usa «Esci da Grabbit» nel menu o Cmd+Q.", "Downloads keep going; to quit use “Quit Grabbit” in the menu or Cmd+Q."))
+                        .changed()
+                {
+                    self.cfg.save();
+                }
                 ui.horizontal(|ui| {
                     let can_check = !self.update_checking && !matches!(self.update, UpdateUi::Working(_));
                     if ui.add_enabled(can_check, egui::Button::new(tr!("Controlla aggiornamenti di Grabbit", "Check for Grabbit updates"))).clicked() {
