@@ -343,3 +343,12 @@ Accettazione:
 - [snap] La finestra diventa alta quanto la barra, con «Mostra tutto»; poi torna alla grandezza di prima.
 - [snap] Se non c'è più niente in ascolto, torna da sola la finestra intera.
 Stato: fatta
+
+### S-031 Licenze e crediti
+Come utente, da «Licenze e crediti» in fondo alla finestra vedo la licenza di Grabbit, i crediti
+(Dropall), i programmi che Grabbit scarica (yt-dlp, FFmpeg, Deno, QuickJS) e le licenze di tutte le
+librerie incluse.
+Accettazione:
+- [unit] Ogni libreria di Cargo.lock è in `assets/licenses.txt` (generato da `scripts/licenses.py`).
+- [snap] Finestra con le sezioni, i link e l'elenco per licenza; «Chiudi» o Esc la chiudono.
+Stato: fatta

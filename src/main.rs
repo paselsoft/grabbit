@@ -61,6 +61,7 @@ mod tests {
         for (name, src) in [
             ("app.rs", include_str!("app.rs")),
             ("app/dm_tab.rs", include_str!("app/dm_tab.rs")),
+            ("app/credits.rs", include_str!("app/credits.rs")),
             ("app/torrent_tab.rs", include_str!("app/torrent_tab.rs")),
             ("torrent.rs", include_str!("torrent.rs")),
             ("torrent/qbit.rs", include_str!("torrent/qbit.rs")),

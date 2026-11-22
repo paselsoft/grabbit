@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod credits;
 mod dm_tab;
 mod menubar_glue;
 mod torrent_tab;
@@ -279,6 +280,8 @@ pub struct App {
     login_notice: Option<(String, bool)>,
     /// mini player: dimensioni della finestra intera da rimettere (None = finestra intera)
     mini: Option<egui::Vec2>,
+    /// finestra «Licenze e crediti» aperta
+    show_credits: bool,
     /// scheda «File»: download manager dei file (code, pianificazione, limite)
     dm: crate::dm::Manager,
     dm_ui: dm_tab::DmUi,
@@ -341,6 +344,7 @@ impl App {
             login_busy: None,
             login_notice: None,
             mini: None,
+            show_credits: false,
             dm: {
                 let ctx = cc.egui_ctx.clone();
                 let state = tools::project_dirs().map(|d| d.config_dir().join("downloads.json"));
@@ -1135,6 +1139,7 @@ impl eframe::App for App {
                     self.footer(ui);
                 });
         });
+        self.credits_window(ctx);
     }
 }
 
@@ -2708,7 +2713,7 @@ impl App {
         out
     }
 
-    fn footer(&self, ui: &mut egui::Ui) {
+    fn footer(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let yt = self.tools.ytdlp.as_deref().unwrap_or("…");
         let ok = |b: bool| if b { "ok" } else { tr!("manca", "missing") };
@@ -2736,6 +2741,12 @@ impl App {
                 .small()
                 .color(ui.visuals().weak_text_color()),
         );
+        if ui
+            .small_button(tr!("Licenze e crediti", "Licenses and credits"))
+            .clicked()
+        {
+            self.show_credits = true;
+        }
     }
 }
 
