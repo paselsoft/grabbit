@@ -122,6 +122,10 @@ enum Msg {
     Trashed(Result<PathBuf, String>),
     /// album aggiunto a Musica o iTunes (nome dell'album, o errore)
     MusicAdded(Result<String, String>),
+    /// «Dividi in brani»: a che punto è (brani fatti, totale)
+    CueProgress(usize, usize),
+    /// «Dividi in brani» finito: cartella e numero di brani, o errore
+    CueDone(Result<(PathBuf, usize), String>),
     /// «Aggiorna l'accesso» finito per un sito (cookie salvati, o errore)
     LoginDone {
         site: &'static str,
@@ -914,6 +918,25 @@ impl App {
                 self.add_torrents(files);
             }
             Msg::Torrent(u) => self.torrent_update(u, ctx),
+            Msg::CueProgress(done, total) => self.listen.splitting = Some((done, total)),
+            Msg::CueDone(r) => {
+                self.listen.splitting = None;
+                match r {
+                    Ok((dir, n)) => {
+                        self.listen.notice = Some((
+                            tr!(
+                                format!("Divisi {n} brani; il file intero e il .cue sono nel Cestino."),
+                                format!("Split into {n} tracks; the whole file and the .cue are in the Trash.")
+                            ),
+                            false,
+                        ));
+                        // la libreria si rilegge: l'album ora ha i suoi brani
+                        self.listen.open = None;
+                        self.music_changed(ctx, &dir);
+                    }
+                    Err(e) => self.listen.notice = Some((e, true)),
+                }
+            }
             Msg::DmFolder(p) => {
                 self.cfg.dm_dir = p;
                 self.cfg.save();
@@ -2787,6 +2810,8 @@ enum Tab {
 struct ListenUi {
     library: Option<player::Library>,
     busy: bool,
+    /// «Dividi in brani» in corso: brani fatti, totale
+    splitting: Option<(usize, usize)>,
     /// lettura della cartella in corso: brani letti, totale
     progress: Option<(usize, usize)>,
     seq: u64,
@@ -2938,6 +2963,56 @@ impl App {
         if self.listen.library.is_some() && !self.listen.busy {
             self.start_scan(ctx);
         }
+    }
+
+    /// «Dividi in brani»: un file per brano con ffmpeg, poi originali nel Cestino.
+    fn split_cue(&mut self, ctx: &egui::Context, cue_file: PathBuf, audio: PathBuf) {
+        let Some(ffmpeg) = self.tools.ffmpeg.clone() else {
+            self.listen.notice = Some((
+                tr!(
+                    "Per dividere in brani serve ffmpeg, che non è ancora pronto.",
+                    "Splitting into tracks needs ffmpeg, which is not ready yet."
+                )
+                .into(),
+                true,
+            ));
+            return;
+        };
+        let ffmpeg = ffmpeg.join(format!("ffmpeg{}", tools::EXE));
+        self.listen.splitting = Some((0, 0));
+        self.listen.notice = None;
+        // la riproduzione di quel file si ferma: sta per andare nel Cestino
+        if self.now_track().is_some_and(|t| t.path == audio) {
+            let st = self.engine.status();
+            if st.loaded && !st.paused {
+                self.toggle_play();
+            }
+        }
+        let send = self.sender(ctx);
+        thread::spawn(move || {
+            let dir = audio.parent().map(PathBuf::from).unwrap_or_default();
+            let cover = player::folder_image(&dir);
+            let tell = send.clone();
+            let r = crate::cue::split(&ffmpeg, &cue_file, &audio, cover.as_deref(), &|d, t| {
+                tell(Msg::CueProgress(d, t))
+            })
+            .map_err(|e| {
+                tr!(
+                    format!("Divisione non riuscita: {e:#}"),
+                    format!("Splitting failed: {e:#}")
+                )
+            })
+            .and_then(|made| {
+                trash::delete_all([&audio, &cue_file]).map_err(|e| {
+                    tr!(
+                        format!("Brani creati, ma il file intero non è andato nel Cestino: {e}"),
+                        format!("Tracks created, but the whole file did not go to the Trash: {e}")
+                    )
+                })?;
+                Ok((dir, made.len()))
+            });
+            send(Msg::CueDone(r));
+        });
     }
 
     /// Rilegge la cartella della musica (in un thread a parte).
@@ -3363,6 +3438,7 @@ impl App {
         let mut play: Option<(usize, usize)> = None;
         let mut play_group: Option<Vec<usize>> = None;
         let mut add_music: Option<PathBuf> = None;
+        let mut split_cue: Option<(PathBuf, PathBuf)> = None;
         let mut watch: Option<PathBuf> = None;
         let mut toggle_norm = false;
         let mut confirm: Option<usize> = None;
@@ -3618,6 +3694,30 @@ impl App {
                                     confirm = Some(ai);
                                 }
                             });
+                            // album «immagine + CUE»: un file con tutto il disco
+                            if let Some((cue_file, audio)) = &a.cue {
+                                if let Some((done, total)) = self.listen.splitting {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(tr!(
+                                            format!("Divido i brani… {done} di {total}"),
+                                            format!("Splitting tracks… {done} of {total}")
+                                        ));
+                                    });
+                                } else if ui
+                                    .button(
+                                        RichText::new(tr!("Dividi in brani", "Split into tracks"))
+                                            .strong(),
+                                    )
+                                    .on_hover_text(tr!(
+                                        "L'album è un solo file con il suo .cue: crea un file per brano con titoli e copertina, senza perdere qualità. Poi il file intero e il .cue vanno nel Cestino.",
+                                        "The album is a single file with its .cue: creates one file per track with titles and cover, without losing quality. Then the whole file and the .cue go to the Trash."
+                                    ))
+                                    .clicked()
+                                {
+                                    split_cue = Some((cue_file.clone(), audio.clone()));
+                                }
+                            }
                         });
                     });
                     if let Some((text, err)) = &self.listen.notice {
@@ -3754,6 +3854,9 @@ impl App {
         }
         if let Some(dir) = add_music {
             self.add_to_music(ctx, dir);
+        }
+        if let Some((cue_file, audio)) = split_cue {
+            self.split_cue(ctx, cue_file, audio);
         }
         if let Some(video) = watch {
             // il player di Grabbit si mette in pausa: si guarda il video

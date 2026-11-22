@@ -4,6 +4,7 @@
 
 mod app;
 mod config;
+mod cue;
 mod dm;
 mod downloader;
 mod i18n;
@@ -67,6 +68,7 @@ mod tests {
             ("torrent/qbit.rs", include_str!("torrent/qbit.rs")),
             ("dm.rs", include_str!("dm.rs")),
             ("logins.rs", include_str!("logins.rs")),
+            ("cue.rs", include_str!("cue.rs")),
             ("menubar.rs", include_str!("menubar.rs")),
             ("app/menubar_glue.rs", include_str!("app/menubar_glue.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
