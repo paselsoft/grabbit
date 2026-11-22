@@ -192,11 +192,13 @@ impl Status {
         }
     }
 
-    /// Testo accanto all'icona: la percentuale mentre si scarica.
-    pub fn title(&self) -> Option<String> {
+    /// Testo accanto all'icona: la percentuale mentre si scarica, vuoto quando è tutto finito.
+    /// Vuoto e non «nessun titolo»: tray-icon su macOS ignora `None` e lascerebbe l'ultima
+    /// percentuale (es. «99%») anche a download finiti.
+    pub fn title(&self) -> String {
         match self.fraction {
-            Some(f) if self.active > 0 => Some(format!("{:.0}%", f.clamp(0.0, 1.0) * 100.0)),
-            _ => None,
+            Some(f) if self.active > 0 => format!("{:.0}%", f.clamp(0.0, 1.0) * 100.0),
+            _ => String::new(),
         }
     }
 
@@ -406,7 +408,7 @@ mod imp {
                 self.look = Some(look);
             }
             if self.shown.as_ref() != Some(st) {
-                tray.set_title(st.title());
+                tray.set_title(Some(st.title()));
                 tray.set_menu(Some(Box::new(menu(st))));
                 self.shown = Some(st.clone());
             }
@@ -768,14 +770,21 @@ mod tests {
     fn status_texts_and_look() {
         let mut st = Status::default();
         assert_eq!(st.look(), Look::Idle);
-        assert_eq!(st.title(), None);
+        assert_eq!(st.title(), "");
         st.look_failed = true;
         assert_eq!(st.look(), Look::Failed);
         st.active = 2;
         st.fraction = Some(0.54);
         st.speed = 3.0 * 1024.0 * 1024.0;
         assert_eq!(st.look(), Look::Progress(6));
-        assert_eq!(st.title().as_deref(), Some("54%"));
+        assert_eq!(st.title(), "54%");
+        // finiti i download la percentuale sparisce (non resta «99%»)
+        let done = Status {
+            active: 0,
+            fraction: Some(0.99),
+            ..Default::default()
+        };
+        assert_eq!(done.title(), "");
         assert!(st.header().contains("2 "));
         assert!(st.header().contains("MB/s"));
     }
