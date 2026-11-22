@@ -385,3 +385,11 @@ torrent (smettono di essere condivisi); i file scaricati restano nella cartella.
 Accettazione:
 - [snap] Il pulsante compare solo se c'è almeno un torrent al 100%; dopo il clic restano quelli in corso, con «Tolti N torrent completati».
 Stato: fatta
+
+### S-036 Seed e peer come in qBittorrent
+Come utente, nella riga di un torrent leggo seed e peer separati, con tra parentesi quanti ce ne sono in
+tutto secondo i tracker: «seed 6 (7) · peer 0 (50)», come le colonne di qBittorrent.
+Accettazione:
+- [unit] qBittorrent: num_seeds/num_leechs e num_complete/num_incomplete; Transmission: peersSendingToUs, peersConnected e trackerStats (il conteggio più alto, -1 = non si sa).
+- [snap] Riga con «seed 6 (7) · peer 0 (50)».
+Stato: fatta

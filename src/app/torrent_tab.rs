@@ -293,9 +293,15 @@ fn torrent_row(
                 parts.push(tr!(format!("invia {up}"), format!("sending {up}")));
             }
             if matches!(t.status, Status::Downloading | Status::Seeding) {
-                parts.push(tr!(
-                    format!("{} peer", t.peers),
-                    format!("{} peers", t.peers)
+                // come qBittorrent: collegati, e tra parentesi quanti ce ne sono in tutto
+                let count = |n: u32, all: Option<u32>| match all {
+                    Some(a) => format!("{n} ({a})"),
+                    None => n.to_string(),
+                };
+                parts.push(format!(
+                    "seed {} · peer {}",
+                    count(t.seeds, t.swarm_seeds),
+                    count(t.peers, t.swarm_peers)
                 ));
             }
             if !parts.is_empty() {

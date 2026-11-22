@@ -83,7 +83,13 @@ pub struct Torrent {
     pub up_rate: u64,
     /// secondi, None se sconosciuto
     pub eta: Option<u64>,
+    /// seed collegati (in qBittorrent «Seed 6 (7)»: il 6)
+    pub seeds: u32,
+    /// altri peer collegati, che stanno ancora scaricando («Peer 0 (50)»: lo 0)
     pub peers: u32,
+    /// seed e peer noti in tutto dai tracker (il 7 e il 50), se si conoscono
+    pub swarm_seeds: Option<u32>,
+    pub swarm_peers: Option<u32>,
     pub dir: String,
     pub error: Option<String>,
     /// i metadati di un magnet non sono ancora arrivati
@@ -112,6 +118,11 @@ struct RawTorrent {
     eta: i64,
     #[serde(default)]
     peers_connected: u32,
+    /// peer da cui stiamo ricevendo (i «seed» per chi scarica)
+    #[serde(default)]
+    peers_sending_to_us: u32,
+    #[serde(default)]
+    tracker_stats: Vec<TrackerStat>,
     #[serde(default)]
     download_dir: String,
     #[serde(default)]
@@ -120,6 +131,30 @@ struct RawTorrent {
     error_string: String,
     #[serde(default)]
     metadata_percent_complete: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackerStat {
+    /// -1 se il tracker non l'ha detto
+    #[serde(default = "minus_one")]
+    seeder_count: i64,
+    #[serde(default = "minus_one")]
+    leecher_count: i64,
+}
+
+fn minus_one() -> i64 {
+    -1
+}
+
+/// Il conteggio più alto tra i tracker che l'hanno dato.
+fn best_count(stats: &[TrackerStat], f: impl Fn(&TrackerStat) -> i64) -> Option<u32> {
+    stats
+        .iter()
+        .map(f)
+        .filter(|n| *n >= 0)
+        .max()
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 impl From<RawTorrent> for Torrent {
@@ -143,7 +178,10 @@ impl From<RawTorrent> for Torrent {
             down_rate: r.rate_download,
             up_rate: r.rate_upload,
             eta: u64::try_from(r.eta).ok(),
-            peers: r.peers_connected,
+            seeds: r.peers_sending_to_us.min(r.peers_connected),
+            peers: r.peers_connected.saturating_sub(r.peers_sending_to_us),
+            swarm_seeds: best_count(&r.tracker_stats, |t| t.seeder_count),
+            swarm_peers: best_count(&r.tracker_stats, |t| t.leecher_count),
             dir: r.download_dir,
             error: (r.error != 0 && !r.error_string.is_empty()).then_some(r.error_string),
             fetching_metadata: r.metadata_percent_complete.is_some_and(|m| m < 1.0),
@@ -270,7 +308,8 @@ impl Transmission {
             "torrent-get",
             json!({ "fields": [
                 "id", "name", "status", "percentDone", "sizeWhenDone", "leftUntilDone",
-                "rateDownload", "rateUpload", "eta", "peersConnected", "downloadDir",
+                "rateDownload", "rateUpload", "eta", "peersConnected", "peersSendingToUs",
+                "trackerStats", "downloadDir",
                 "error", "errorString", "metadataPercentComplete"
             ]}),
         )?;
@@ -687,6 +726,9 @@ mod tests {
                 { "id": 1, "name": "artix.iso", "status": 4, "percentDone": 0.25,
                   "sizeWhenDone": 2000, "leftUntilDone": 1500, "rateDownload": 100,
                   "rateUpload": 5, "eta": 15, "peersConnected": 7,
+                  "peersSendingToUs": 6,
+                  "trackerStats": [{"seederCount": 7, "leecherCount": 50},
+                                   {"seederCount": -1, "leecherCount": -1}],
                   "downloadDir": "/d", "error": 0, "errorString": "",
                   "metadataPercentComplete": 1.0 },
                 { "id": 2, "name": "magnet", "status": 0, "percentDone": 0.0,
@@ -699,7 +741,9 @@ mod tests {
         assert_eq!(l[0].status, Status::Downloading);
         assert_eq!(l[0].done_bytes, 500);
         assert_eq!(l[0].eta, Some(15));
-        assert_eq!(l[0].peers, 7);
+        assert_eq!((l[0].seeds, l[0].peers), (6, 1));
+        assert_eq!((l[0].swarm_seeds, l[0].swarm_peers), (Some(7), Some(50)));
+        assert_eq!(l[1].swarm_seeds, None);
         assert!(l[0].error.is_none() && !l[0].fetching_metadata);
         assert_eq!(l[1].status, Status::Stopped);
         assert_eq!(l[1].eta, None);
