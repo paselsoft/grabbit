@@ -51,8 +51,11 @@ xz2 = { version = "0.1", features = ["static"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 tray-icon = { version = "0.21", default-features = false }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSValue"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder", "NSImage"] }
+# tasti multimediali (play/pausa, avanti, indietro) e «in riproduzione» del Mac (dalla 10.12.2)
+objc2-media-player = { version = "0.3", default-features = false, features = ["std", "block2", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPNowPlayingInfoCenter", "MPMediaItem"] }
+block2 = "0.6"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
