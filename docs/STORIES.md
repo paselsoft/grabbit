@@ -291,3 +291,19 @@ Accettazione:
 - [snap] Righe delle due app insieme con l'etichetta dell'app; l'app non scelta e chiusa non mostra avvisi.
 - [manual] Sul Mac, un magnet aggiunto a qBittorrent.
 Stato: fatta
+
+## Milestone 11: barra dei menu e Dock (0.13.0, poi 0.14.0)
+
+Dal mockup «Grabbit: barra dei menu e Dock». S-026 (passo 1), S-027 (passo 2)
+
+### S-026 Icona nella barra dei menu e numero sul Dock
+Come utente del Mac, vedo nella barra dei menu l'avanzamento di tutti i download (video e musica,
+file, torrent) e dal suo menu scarico il link copiato, metto in pausa file e torrent, scelgo il
+limite di velocità, apro Grabbit o la cartella dei download; sul Dock vedo quanti download sono in corso.
+Accettazione:
+- [unit] Icone ferma, in download (barretta a passi), finito, non riuscito; percentuale e prima riga del menu.
+- [unit] Link copiato: magnet e .torrent all'app torrent, .iso/.zip/.dmg… alla scheda «File», il resto a yt-dlp.
+- [unit] Ogni voce del menu ha un id che torna alla sua azione.
+- [ci] Compila per macOS (Rust puro sulle API di AppKit, nessun codice C).
+- [manual] Sul Mac (High Sierra): icona, menu, limite, «Scarica il link copiato», numero sul Dock.
+Stato: fatta

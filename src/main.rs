@@ -8,6 +8,7 @@ mod dm;
 mod downloader;
 mod i18n;
 mod logins;
+mod menubar;
 mod net;
 mod player;
 mod search;
@@ -65,6 +66,8 @@ mod tests {
             ("torrent/qbit.rs", include_str!("torrent/qbit.rs")),
             ("dm.rs", include_str!("dm.rs")),
             ("logins.rs", include_str!("logins.rs")),
+            ("menubar.rs", include_str!("menubar.rs")),
+            ("app/menubar_glue.rs", include_str!("app/menubar_glue.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
             ("player.rs", include_str!("player.rs")),
             ("search.rs", include_str!("search.rs")),

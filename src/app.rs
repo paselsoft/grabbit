@@ -17,6 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 mod dm_tab;
+mod menubar_glue;
 mod torrent_tab;
 
 // Tema scuro con accento arancione.
@@ -284,6 +285,9 @@ pub struct App {
     torrents: torrent_tab::TorrentUi,
     /// la scheda «File» è aperta: l'elenco dei torrent si rilegge spesso
     torrent_watch: Arc<AtomicBool>,
+    /// icona nella barra dei menu e numero sul Dock (solo Mac)
+    menubar: crate::menubar::MenuBar,
+    menubar_ui: menubar_glue::MenuBarUi,
 }
 
 impl App {
@@ -343,6 +347,11 @@ impl App {
             torrent_tx: channel().0,
             torrents: Default::default(),
             torrent_watch: Arc::new(AtomicBool::new(false)),
+            menubar: {
+                let ctx = cc.egui_ctx.clone();
+                crate::menubar::MenuBar::new(move || ctx.request_repaint())
+            },
+            menubar_ui: Default::default(),
         };
         {
             let (ttx, trx) = channel();
@@ -967,6 +976,7 @@ impl App {
                 Event::Finished => {
                     self.running = false;
                     self.notify_finished(ctx);
+                    self.menubar_finished();
                     // nuovi brani nella cartella: «Ascolta» la rilegge alla prossima apertura
                     self.listen.stale = true;
                     // la libreria già letta (o «Già nella libreria» nei risultati) si aggiorna
@@ -996,6 +1006,7 @@ impl eframe::App for App {
         self.player_tick(ctx);
         self.update_title(ctx);
         self.check_clipboard(ctx);
+        self.menubar_tick(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -2543,6 +2554,7 @@ impl App {
         if !gained {
             return;
         }
+        self.menubar_seen();
         let Some(text) = arboard::Clipboard::new()
             .ok()
             .and_then(|mut c| c.get_text().ok())

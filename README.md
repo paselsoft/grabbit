@@ -56,6 +56,9 @@ The interface is in Italian if your system language is Italian, and in English o
   connections, queues you can start, stop and schedule, pause and resume even after closing.
 - **Speed limit** in KB/s for all downloads, files, videos and music, so the network stays
   usable for others.
+- **Mac menu bar**: an icon shows the progress of all downloads and opens a menu with “Download
+  the copied link”, pause for files and torrents, speed limit, “Open Grabbit” and the downloads
+  folder; the Dock shows how many downloads are running.
 - **Torrents and magnet links** via Transmission or qBittorrent: paste them in the Files tab and
   Grabbit hands them to the chosen app and shows the torrents of both with progress, speed and peers.
   - Transmission: Preferences › Remote › “Enable remote access” (port 9091), allow only 127.0.0.1.
@@ -203,6 +206,7 @@ To force the interface language (for testing): `GRABBIT_LANG=it` or `GRABBIT_LAN
 | `src/selfupdate.rs` | automatic app updates |
 | `src/dm.rs`, `src/app/dm_tab.rs` | Files tab: download manager (adapted from Dropall) |
 | `src/torrent.rs`, `src/torrent/qbit.rs`, `src/app/torrent_tab.rs` | torrents via Transmission and qBittorrent |
+| `src/menubar.rs`, `src/app/menubar_glue.rs` | menu bar icon and Dock badge (Mac) |
 | `src/config.rs` | saved settings |
 | `src/i18n.rs` | interface language (Italian / English) |
 

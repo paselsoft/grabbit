@@ -57,6 +57,9 @@ L'interfaccia è in italiano se il sistema è in italiano, in inglese per qualsi
   code da avviare, fermare e pianificare a un orario, pausa e ripresa anche dopo la chiusura.
 - **Limite di velocità** in KB/s per tutti i download, file, video e musica, così la rete
   resta libera per gli altri.
+- **Barra dei menu del Mac**: un'icona mostra l'avanzamento di tutti i download e apre un menu
+  con «Scarica il link copiato», pausa di file e torrent, limite di velocità, «Apri Grabbit» e la
+  cartella dei download; sul Dock il numero dei download in corso.
 - **Torrent e magnet** tramite Transmission o qBittorrent: incollati nella scheda File, Grabbit
   li passa all'app scelta e mostra i torrent di tutte e due con avanzamento, velocità e peer.
   - Transmission: Preferenze › Remoto › «Abilita accesso remoto» (porta 9091), consenti solo
@@ -205,6 +208,7 @@ Per forzare la lingua dell'interfaccia (prove): `GRABBIT_LANG=it` oppure `GRABBI
 | `src/selfupdate.rs` | aggiornamento automatico dell'app |
 | `src/dm.rs`, `src/app/dm_tab.rs` | scheda «File»: download manager (adattato da Dropall) |
 | `src/torrent.rs`, `src/torrent/qbit.rs`, `src/app/torrent_tab.rs` | torrent tramite Transmission e qBittorrent |
+| `src/menubar.rs`, `src/app/menubar_glue.rs` | icona nella barra dei menu e numero sul Dock (Mac) |
 | `src/config.rs` | impostazioni salvate |
 | `src/i18n.rs` | lingua dell'interfaccia (italiano / inglese) |
 
