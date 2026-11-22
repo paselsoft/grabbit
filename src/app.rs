@@ -2834,6 +2834,9 @@ struct ListenUi {
     queue: Vec<PathBuf>,
     /// posizione in `queue` del brano in ascolto
     qpos: usize,
+    /// «In coda»: brani scelti con «Riproduci dopo» / «Aggiungi alla coda», che vengono prima
+    /// del resto dell'elenco
+    upnext: Vec<PathBuf>,
     /// l'ultimo brano ascoltato è già stato ripreso (una volta sola, all'avvio)
     restored: bool,
     /// quando è stata salvata l'ultima posizione nel brano
@@ -3200,6 +3203,149 @@ impl App {
         }
     }
 
+    /// «Riproduci dopo» (`next`, subito dopo il brano in ascolto) o «Aggiungi alla coda» (in
+    /// fondo alla coda). Se non suona niente, parte subito.
+    fn enqueue(&mut self, paths: Vec<PathBuf>, next: bool) {
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        if self.listen.now.is_none() {
+            self.start_queue(paths, 0);
+            return;
+        }
+        if next {
+            self.listen.upnext.splice(0..0, paths);
+        } else {
+            self.listen.upnext.extend(paths);
+        }
+        self.listen.notice = Some((
+            if next {
+                tr!(
+                    format!("{} dopo il brano in ascolto.", tracks_label(n)),
+                    format!("{} after the current track.", tracks_label(n))
+                )
+            } else {
+                tr!(
+                    format!(
+                        "{} {} alla coda.",
+                        tracks_label(n),
+                        if n == 1 { "aggiunto" } else { "aggiunti" }
+                    ),
+                    format!("{} added to the queue.", tracks_label(n))
+                )
+            },
+            false,
+        ));
+    }
+
+    /// I brani audio di un album (i video si aprono a parte).
+    fn album_paths(&self, album: usize) -> Vec<PathBuf> {
+        self.listen
+            .library
+            .as_ref()
+            .and_then(|l| l.albums.get(album))
+            .map(|a| {
+                a.tracks
+                    .iter()
+                    .filter(|t| !t.video)
+                    .map(|t| t.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Titolo e artista di un brano della libreria, per l'elenco «In coda».
+    fn track_label(&self, path: &std::path::Path) -> String {
+        match self.locate(path).and_then(|(a, t)| {
+            let al = self.listen.library.as_ref()?.albums.get(a)?;
+            Some((al, al.tracks.get(t)?))
+        }) {
+            Some((al, t)) => {
+                let who = if t.artist.is_empty() {
+                    &al.artist
+                } else {
+                    &t.artist
+                };
+                if who.is_empty() {
+                    t.title.clone()
+                } else {
+                    format!("{} · {who}", t.title)
+                }
+            }
+            None => path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Riquadro «In coda»: i brani che verranno prima del resto dell'elenco.
+    fn upnext_card(&mut self, ui: &mut egui::Ui) {
+        if self.listen.upnext.is_empty() {
+            return;
+        }
+        let labels: Vec<String> = self
+            .listen
+            .upnext
+            .iter()
+            .map(|p| self.track_label(p))
+            .collect();
+        let mut remove: Option<usize> = None;
+        let mut clear = false;
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(tr!(
+                        format!("In coda ({})", labels.len()),
+                        format!("Up next ({})", labels.len())
+                    ))
+                    .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    clear = ui
+                        .small_button(tr!("Svuota la coda", "Clear the queue"))
+                        .clicked();
+                });
+            });
+            egui::CollapsingHeader::new(
+                RichText::new(tr!("Mostra i brani", "Show the tracks")).small(),
+            )
+            .id_salt("upnext_list")
+            .default_open(labels.len() <= 5)
+            .show(ui, |ui| {
+                for (i, l) in labels.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{}.", i + 1))
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.add(egui::Label::new(l).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button(tr!("Togli", "Remove"))
+                                .on_hover_text(tr!(
+                                    "Toglie questo brano dalla coda",
+                                    "Removes this track from the queue"
+                                ))
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if let Some(i) = remove {
+            self.listen.upnext.remove(i);
+        }
+        if clear {
+            self.listen.upnext.clear();
+        }
+    }
+
     /// «Ascolta l'album» o un clic su un brano: l'album, da quel brano.
     fn play_album_from(&mut self, album: usize, track: usize) {
         let list: Vec<PathBuf> = self
@@ -3244,7 +3390,14 @@ impl App {
         if self.listen.now.is_none() {
             return;
         }
-        if auto && self.cfg.repeat == Repeat::One {
+        // «Ripeti brano» rifà quello in ascolto; altrimenti prima i brani in coda
+        if (auto && self.cfg.repeat == Repeat::One)
+            || take_upnext(
+                &mut self.listen.queue,
+                &mut self.listen.qpos,
+                &mut self.listen.upnext,
+            )
+        {
             self.play_current();
         } else if self.listen.qpos + 1 < self.listen.queue.len() {
             self.listen.qpos += 1;
@@ -3439,10 +3592,15 @@ impl App {
         let mut play_group: Option<Vec<usize>> = None;
         let mut add_music: Option<PathBuf> = None;
         let mut split_cue: Option<(PathBuf, PathBuf)> = None;
+        // «Riproduci dopo» (true) / «Aggiungi alla coda» (false): brani o un album
+        let mut enqueue: Option<(Vec<PathBuf>, bool)> = None;
+        let mut enqueue_album: Option<(usize, bool)> = None;
         let mut watch: Option<PathBuf> = None;
         let mut toggle_norm = false;
         let mut confirm: Option<usize> = None;
         let mut open: Option<Option<usize>> = None;
+        // i brani in coda, sopra la libreria
+        self.upnext_card(ui);
         card(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(tr!("Musica in", "Music in")).strong());
@@ -3621,8 +3779,11 @@ impl App {
                                 let a = &lib.albums[i];
                                 let cover = self.listen.covers.get(i).and_then(|c| c.as_ref());
                                 let playing = self.listen.now.is_some_and(|(na, _)| na == i);
-                                if album_row(ui, a, i, cover, playing) {
-                                    open = Some(Some(i));
+                                match album_row(ui, a, i, cover, playing) {
+                                    RowClick::Open => open = Some(Some(i)),
+                                    RowClick::Next => enqueue_album = Some((i, true)),
+                                    RowClick::Add => enqueue_album = Some((i, false)),
+                                    RowClick::None => {}
                                 }
                                 ui.add_space(4.0);
                             }
@@ -3666,6 +3827,28 @@ impl App {
                             if ui.add(btn).clicked() {
                                 play = Some((ai, 0));
                             }
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .small_button(tr!("Riproduci dopo", "Play next"))
+                                    .on_hover_text(tr!(
+                                        "L'album suona subito dopo il brano in ascolto. Per un solo brano: tasto destro sul brano.",
+                                        "The album plays right after the current track. For a single track: right-click it."
+                                    ))
+                                    .clicked()
+                                {
+                                    enqueue_album = Some((ai, true));
+                                }
+                                if ui
+                                    .small_button(tr!("Aggiungi alla coda", "Add to queue"))
+                                    .on_hover_text(tr!(
+                                        "L'album va in fondo alla coda, dopo gli altri brani in coda",
+                                        "The album goes to the end of the queue, after the other queued tracks"
+                                    ))
+                                    .clicked()
+                                {
+                                    enqueue_album = Some((ai, false));
+                                }
+                            });
                             ui.horizontal_wrapped(|ui| {
                                 if ui
                                     .small_button(reveal_label())
@@ -3826,6 +4009,21 @@ impl App {
                                 egui::StrokeKind::Outside,
                             );
                         }
+                        if !t.video {
+                            resp.context_menu(|ui| {
+                                if ui.button(tr!("Riproduci dopo", "Play next")).clicked() {
+                                    enqueue = Some((vec![t.path.clone()], true));
+                                    ui.close();
+                                }
+                                if ui
+                                    .button(tr!("Aggiungi alla coda", "Add to queue"))
+                                    .clicked()
+                                {
+                                    enqueue = Some((vec![t.path.clone()], false));
+                                    ui.close();
+                                }
+                            });
+                        }
                         if resp.clicked() {
                             if t.video {
                                 watch = Some(t.path.clone());
@@ -3857,6 +4055,13 @@ impl App {
         }
         if let Some((cue_file, audio)) = split_cue {
             self.split_cue(ctx, cue_file, audio);
+        }
+        if let Some((album, next)) = enqueue_album {
+            let paths = self.album_paths(album);
+            self.enqueue(paths, next);
+        }
+        if let Some((paths, next)) = enqueue {
+            self.enqueue(paths, next);
         }
         if let Some(video) = watch {
             // il player di Grabbit si mette in pausa: si guarda il video
@@ -4369,14 +4574,37 @@ fn album_matches(a: &player::Album, needle: &str) -> bool {
             .any(|t| t.title.to_lowercase().contains(needle))
 }
 
-/// Una riga dell'elenco degli album; `true` se è stata cliccata.
+/// Il primo brano «In coda» entra nell'elenco subito dopo quello in ascolto e diventa il
+/// corrente: «indietro» lo ritrova, e finita la coda l'elenco riprende da dov'era.
+/// `false` se la coda è vuota.
+fn take_upnext(queue: &mut Vec<PathBuf>, qpos: &mut usize, upnext: &mut Vec<PathBuf>) -> bool {
+    if upnext.is_empty() {
+        return false;
+    }
+    let p = upnext.remove(0);
+    *qpos = (*qpos + 1).min(queue.len());
+    queue.insert(*qpos, p);
+    true
+}
+
+/// Cosa è stato chiesto su una riga dell'elenco degli album.
+enum RowClick {
+    None,
+    Open,
+    /// tasto destro › «Riproduci dopo»
+    Next,
+    /// tasto destro › «Aggiungi alla coda»
+    Add,
+}
+
+/// Una riga dell'elenco degli album: clic per aprirlo, tasto destro per la coda.
 fn album_row(
     ui: &mut egui::Ui,
     a: &player::Album,
     i: usize,
     cover: Option<&egui::TextureHandle>,
     playing: bool,
-) -> bool {
+) -> RowClick {
     let row = ui
         .horizontal(|ui| {
             cover_box(ui, cover, COVER_LIST);
@@ -4450,7 +4678,24 @@ fn album_row(
             egui::StrokeKind::Outside,
         );
     }
-    resp.clicked()
+    let mut out = RowClick::None;
+    resp.context_menu(|ui| {
+        if ui.button(tr!("Riproduci dopo", "Play next")).clicked() {
+            out = RowClick::Next;
+            ui.close();
+        }
+        if ui
+            .button(tr!("Aggiungi alla coda", "Add to queue"))
+            .clicked()
+        {
+            out = RowClick::Add;
+            ui.close();
+        }
+    });
+    if resp.clicked() {
+        out = RowClick::Open;
+    }
+    out
 }
 
 /// «1 brano», «12 brani».
@@ -4808,6 +5053,29 @@ mod tests {
         assert_eq!(media, ["https://youtu.be/abc", "ytsearch:Adele Hello"]);
         assert_eq!(torrents, [magnet]);
         assert_eq!(files, ["https://ftp.crifo.org/artix/iso/artix.iso"]);
+    }
+
+    #[test]
+    fn queued_tracks_come_before_the_rest_of_the_list() {
+        let p = |s: &str| PathBuf::from(s);
+        // album A1 A2 A3, in ascolto A1; in coda X (riproduci dopo) poi Y (aggiungi alla coda)
+        let mut queue = vec![p("A1"), p("A2"), p("A3")];
+        let mut qpos = 0;
+        let mut upnext = vec![p("X"), p("Y")];
+        let mut played = Vec::new();
+        loop {
+            if take_upnext(&mut queue, &mut qpos, &mut upnext) {
+            } else if qpos + 1 < queue.len() {
+                qpos += 1;
+            } else {
+                break;
+            }
+            played.push(queue[qpos].clone());
+        }
+        assert_eq!(played, [p("X"), p("Y"), p("A2"), p("A3")]);
+        // «indietro» dopo Y ritrova X
+        assert_eq!(queue, [p("A1"), p("X"), p("Y"), p("A2"), p("A3")]);
+        assert!(!take_upnext(&mut queue, &mut qpos, &mut upnext));
     }
 
     #[test]

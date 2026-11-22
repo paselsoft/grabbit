@@ -466,3 +466,18 @@ Accettazione:
 - [snap] Pulsante «Dividi in brani» solo sugli album con .cue; copertina da «Scans/front.jpg».
 - [manual] Sul Mac: l'album di Battisti diviso in 10 brani.
 Stato: fatta
+
+## Milestone 16: coda di ascolto (0.18.0)
+
+S-044
+
+### S-044 Riproduci dopo e Aggiungi alla coda
+Come utente, mentre ascolto metto in coda un album («Riproduci dopo» / «Aggiungi alla coda» nella
+vista dell'album, o tasto destro su un album dell'elenco) o un solo brano (tasto destro sul brano):
+i brani in coda suonano prima del resto dell'elenco, poi l'elenco riprende da dov'era. In cima ad
+«Ascolta» il riquadro «In coda (N)» li elenca, con «Togli» e «Svuota la coda». Se non suona niente,
+il brano o l'album parte subito.
+Accettazione:
+- [unit] Con A1 in ascolto e in coda X, Y: si ascoltano X, Y, A2, A3; «indietro» dopo Y ritrova X.
+- [snap] «Aggiungi alla coda» su un album: riquadro «In coda (1)»; «avanti» passa al brano in coda.
+Stato: fatta
