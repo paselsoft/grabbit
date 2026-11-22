@@ -481,3 +481,17 @@ Accettazione:
 - [unit] Con A1 in ascolto e in coda X, Y: si ascoltano X, Y, A2, A3; «indietro» dopo Y ritrova X.
 - [snap] «Aggiungi alla coda» su un album: riquadro «In coda (1)»; «avanti» passa al brano in coda.
 Stato: fatta
+
+## Milestone 17: tasti multimediali (0.19.0)
+
+S-045
+
+### S-045 Play/pausa, avanti e indietro dalla tastiera del Mac
+Come utente, con i tasti multimediali (F7, F8, F9 sulla tastiera Apple) metto in pausa, riprendo,
+passo al brano dopo o a quello prima in Grabbit, anche quando è in secondo piano o a finestra chiusa,
+senza che si apra iTunes. Il sistema sa cosa sta suonando (titolo, artista, album).
+Accettazione:
+- [unit] Il sistema si aggiorna solo quando cambia brano o stato (non a ogni secondo).
+- [ci] Compila per macOS con MediaPlayer (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`, dalla 10.12.2).
+- [manual] Sul Mac (High Sierra): F8 mette in pausa e riprende, F9 e F7 cambiano brano, con Grabbit dietro un'altra app; iTunes non si apre.
+Stato: fatta

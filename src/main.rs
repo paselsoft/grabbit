@@ -9,6 +9,7 @@ mod dm;
 mod downloader;
 mod i18n;
 mod logins;
+mod mediakeys;
 mod menubar;
 mod net;
 mod player;
@@ -70,6 +71,7 @@ mod tests {
             ("logins.rs", include_str!("logins.rs")),
             ("cue.rs", include_str!("cue.rs")),
             ("menubar.rs", include_str!("menubar.rs")),
+            ("mediakeys.rs", include_str!("mediakeys.rs")),
             ("app/menubar_glue.rs", include_str!("app/menubar_glue.rs")),
             ("downloader.rs", include_str!("downloader.rs")),
             ("player.rs", include_str!("player.rs")),

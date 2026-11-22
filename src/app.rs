@@ -305,6 +305,8 @@ pub struct App {
     /// icona nella barra dei menu e numero sul Dock (solo Mac)
     menubar: crate::menubar::MenuBar,
     menubar_ui: menubar_glue::MenuBarUi,
+    /// tasti multimediali e «in riproduzione» del Mac
+    media_keys: crate::mediakeys::MediaKeys,
 }
 
 impl App {
@@ -372,6 +374,10 @@ impl App {
                 crate::menubar::MenuBar::new(move || ctx.request_repaint())
             },
             menubar_ui: Default::default(),
+            media_keys: {
+                let ctx = cc.egui_ctx.clone();
+                crate::mediakeys::MediaKeys::new(move || ctx.request_repaint())
+            },
         };
         {
             let (ttx, trx) = channel();
@@ -1097,6 +1103,7 @@ impl eframe::App for App {
         self.update_title(ctx);
         self.check_clipboard(ctx);
         self.menubar_tick(ctx);
+        self.media_keys_tick();
         self.keep_in_background(ctx);
     }
 
@@ -3095,6 +3102,45 @@ impl App {
         self.listen.library = Some(library);
         self.listen.busy = false;
         self.restore_last_track();
+    }
+
+    /// Tasti multimediali (F7, F8, F9) e «in riproduzione» per il sistema.
+    fn media_keys_tick(&mut self) {
+        use crate::mediakeys::Key;
+        for k in self.media_keys.keys() {
+            let st = self.engine.status();
+            let playing = st.loaded && !st.paused;
+            match k {
+                Key::Toggle => self.toggle_play(),
+                Key::Play if !playing => self.toggle_play(),
+                Key::Pause if playing => self.toggle_play(),
+                Key::Next => self.play_next(false),
+                Key::Prev => self.play_prev(),
+                Key::Play | Key::Pause => {}
+            }
+        }
+        let st = self.engine.status();
+        let now = self.now_track().map(|t| {
+            let album = self
+                .listen
+                .now
+                .and_then(|(a, _)| self.listen.library.as_ref()?.albums.get(a))
+                .map(|a| (a.name.clone(), a.artist.clone()))
+                .unwrap_or_default();
+            crate::mediakeys::NowPlaying {
+                title: t.title.clone(),
+                artist: if t.artist.is_empty() {
+                    album.1
+                } else {
+                    t.artist.clone()
+                },
+                album: album.0,
+                duration: t.duration.unwrap_or_default().as_secs_f64(),
+                elapsed: st.pos.as_secs_f64(),
+                playing: st.loaded && !st.paused,
+            }
+        });
+        self.media_keys.update(now.as_ref());
     }
 
     fn now_track(&self) -> Option<&player::Track> {
