@@ -56,6 +56,8 @@ pub struct Album {
     pub tracks: Vec<Track>,
     /// copertina già rimpicciolita: larghezza, altezza, pixel RGBA
     pub cover: Option<(u32, u32, Vec<u8>)>,
+    /// formati delle altre copie dello stesso album nella libreria («FLAC» per la copia MP3)
+    pub twins: Vec<&'static str>,
 }
 
 #[derive(Debug, Default)]
@@ -420,6 +422,7 @@ pub fn scan_cached(
     // «Album/CD1», «Album/CD2»: un solo album, disco per disco
     lib.albums = merge_discs(albums, from_tag, root);
     sort_albums(&mut lib.albums);
+    mark_twins(&mut lib.albums);
     // una scansione interrotta non deve buttare via la cache dei file non visti
     if let Some(dir) = cache_dir.filter(|_| !cancel.load(Ordering::Relaxed)) {
         save_cache(dir, &new);
@@ -500,12 +503,79 @@ impl Album {
     pub fn is_single(&self) -> bool {
         self.tracks.len() <= SINGLE_MAX_TRACKS
     }
+
+    /// Formato della maggior parte dei brani: «FLAC», «MP3», «M4A», «WAV», «OGG», «Video».
+    pub fn format(&self) -> &'static str {
+        let label = |t: &Track| match ext_of(&t.path).as_str() {
+            "flac" => "FLAC",
+            "mp3" => "MP3",
+            "m4a" | "mp4" | "aac" | "alac" => "M4A",
+            "wav" | "aif" | "aiff" => "WAV",
+            "ogg" | "oga" => "OGG",
+            _ if t.video => "Video",
+            _ => "",
+        };
+        let all: Vec<&'static str> = self.tracks.iter().map(label).collect();
+        all.iter()
+            .copied()
+            .max_by_key(|f| all.iter().filter(|x| *x == f).count())
+            .unwrap_or("")
+    }
+
+    fn total(&self) -> Duration {
+        self.tracks.iter().filter_map(|t| t.duration).sum()
+    }
+}
+
+/// Due album sono lo stesso disco in copie diverse (es. MP3 e FLAC)? Stesso artista, stessi
+/// brani (numero e durata quasi uguale, entro il 2% o 10 s) e nomi compatibili («19» e
+/// «19-Deluxe-Edition» sì; i due «25» da 14 e 11 brani no).
+fn same_release(a: &Album, b: &Album) -> bool {
+    if a.loose || b.loose || a.group.to_lowercase() != b.group.to_lowercase() {
+        return false;
+    }
+    if a.tracks.len() != b.tracks.len() || a.tracks.len() <= SINGLE_MAX_TRACKS {
+        return false;
+    }
+    let (ta, tb) = (a.total().as_secs_f64(), b.total().as_secs_f64());
+    if ta <= 0.0 || tb <= 0.0 || (ta - tb).abs() > (ta.max(tb) * 0.02).max(10.0) {
+        return false;
+    }
+    let (na, nb) = (match_key(&a.name), match_key(&b.name));
+    !na.is_empty() && !nb.is_empty() && (na.starts_with(&nb) || nb.starts_with(&na))
+}
+
+/// Segna in ogni album i formati delle sue altre copie nella libreria.
+fn mark_twins(albums: &mut [Album]) {
+    let n = albums.len();
+    let mut twins: Vec<Vec<&'static str>> = vec![Vec::new(); n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if same_release(&albums[i], &albums[j]) {
+                let (fi, fj) = (albums[i].format(), albums[j].format());
+                twins[i].push(fj);
+                twins[j].push(fi);
+            }
+        }
+    }
+    for (a, mut t) in albums.iter_mut().zip(twins) {
+        t.sort();
+        t.dedup();
+        a.twins = t;
+    }
 }
 
 /// Ordine di «Ascolta»: artisti in ordine alfabetico (senza artista e brani sciolti in
 /// fondo); per ogni artista prima gli album poi i singoli, dal più recente.
 fn sort_albums(albums: &mut [Album]) {
-    albums.sort_by_key(|a| {
+    // a parità di nome prima la copia di qualità migliore (FLAC prima di MP3)
+    let quality = |a: &Album| match a.format() {
+        "FLAC" | "WAV" => 0,
+        "M4A" | "OGG" => 1,
+        "MP3" => 2,
+        _ => 3,
+    };
+    albums.sort_by_cached_key(|a| {
         (
             a.loose,
             a.group.is_empty(),
@@ -513,6 +583,7 @@ fn sort_albums(albums: &mut [Album]) {
             a.is_single(),
             std::cmp::Reverse(a.year.unwrap_or(0)),
             a.name.to_lowercase(),
+            quality(a),
         )
     });
 }
@@ -1631,6 +1702,40 @@ mod tests {
             b.extend_from_slice(&[0u8; 413]);
         }
         std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn mp3_and_flac_copies_are_twins() {
+        let al = |name: &str, ext: &str, n: usize, secs: u64| Album {
+            name: name.into(),
+            group: "Alessandra Amoroso".into(),
+            tracks: (0..n)
+                .map(|i| Track {
+                    path: PathBuf::from(format!("{name}/{i}.{ext}")),
+                    duration: Some(Duration::from_secs(secs)),
+                    ..Track::default()
+                })
+                .collect(),
+            ..Album::default()
+        };
+        let mut v = vec![
+            al("Tutto accade", "flac", 14, 204),
+            al("Tutto accade", "mp3", 14, 204),
+            al("19-Deluxe-Edition", "flac", 22, 216),
+            al("19", "mp3", 22, 215),
+            al("25", "flac", 14, 260),
+            al("25", "mp3", 11, 265),
+        ];
+        mark_twins(&mut v);
+        assert_eq!(v[0].format(), "FLAC");
+        assert_eq!(v[0].twins, ["MP3"]);
+        assert_eq!(v[1].twins, ["FLAC"]);
+        assert_eq!(v[2].twins, ["MP3"]);
+        assert_eq!(v[3].twins, ["FLAC"]);
+        assert!(
+            v[4].twins.is_empty() && v[5].twins.is_empty(),
+            "edizioni diverse"
+        );
     }
 
     #[test]

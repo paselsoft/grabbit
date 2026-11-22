@@ -421,3 +421,12 @@ Accettazione:
 - [unit] Cartelle dei dischi riconosciute («CD1», «CD 2», «Disc 3», «Disco 1», «Bonus CD»); un album con i brani in ordine.
 - [snap] Vista dell'album con «Disco 1» e «Disco 2».
 Stato: fatta
+
+### S-040 Formato degli album e copie doppie
+Come utente che ha alcuni album sia in MP3 sia in FLAC, vedo il formato di ogni album
+(«2021 · 14 brani · 47:40 · FLAC») e sulla copia doppia «c'è anche in MP3» / «c'è anche in FLAC»;
+a parità di nome la copia FLAC viene prima.
+Accettazione:
+- [unit] Copie dello stesso disco: stesso artista, stessi brani (numero e durata entro il 2% o 10 s), nomi compatibili («19» e «19-Deluxe-Edition»); due edizioni diverse («25» da 14 e da 11 brani) no.
+- [snap] «Tutto accade» in MP3 e FLAC con le due scritte.
+Stato: fatta

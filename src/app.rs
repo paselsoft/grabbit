@@ -4283,6 +4283,18 @@ fn album_row(
                 if !total.is_zero() {
                     meta.push(player::fmt_time(total));
                 }
+                let format = a.format();
+                if !format.is_empty() && !a.loose {
+                    meta.push(format.to_string());
+                }
+                // la stessa uscita c'è anche in un altro formato (copia MP3 e copia FLAC)
+                if !a.twins.is_empty() {
+                    let others = a.twins.join(", ");
+                    meta.push(tr!(
+                        format!("c'è anche in {others}"),
+                        format!("also in {others}")
+                    ));
+                }
                 ui.add(
                     egui::Label::new(
                         RichText::new(meta.join(" · "))
