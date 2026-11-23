@@ -36,6 +36,8 @@ mod egui_icon {
 }
 
 fn main() -> eframe::Result {
+    // dopo un aggiornamento su Windows: via la versione vecchia rimasta accanto al programma
+    selfupdate::remove_old_copy();
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Grabbit")
         .with_inner_size([780.0, 780.0])

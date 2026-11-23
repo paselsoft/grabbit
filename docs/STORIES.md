@@ -495,3 +495,14 @@ Accettazione:
 - [ci] Compila per macOS con MediaPlayer (`MPRemoteCommandCenter`, `MPNowPlayingInfoCenter`, dalla 10.12.2).
 - [manual] Sul Mac (High Sierra): F8 mette in pausa e riprende, F9 e F7 cambiano brano, con Grabbit dietro un'altra app; iTunes non si apre.
 Stato: fatta
+
+### S-046 Aggiornamento su Windows senza allarmi dell'antivirus
+Come utente su un PC aziendale con Symantec, l'aggiornamento automatico di Grabbit non deve sembrare un
+«dropper»: niente eseguibili copiati in Temp che lanciano altri eseguibili. Grabbit rinomina il
+programma in uso in «….old.exe» accanto a sé, mette al suo posto quello nuovo e cancella il vecchio
+al riavvio. Sul Mac resta self-replace (che lì si limita a rinominare).
+Accettazione:
+- [unit] Sostituzione accanto a sé, secondo aggiornamento che sovrascrive il vecchio, ritorno al programma di prima se la copia non riesce.
+- [ci] La versione Windows non contiene più self-replace.
+- [manual] Sul PC aziendale: dal prossimo aggiornamento in poi nessun avviso «SONAR.Dropper».
+Stato: fatta
