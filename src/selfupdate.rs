@@ -265,12 +265,62 @@ pub fn apply(rel: &Release, status: &mut dyn FnMut(String)) -> Result<()> {
         fs::rename(&staged, &appimage)?;
         let _ = fs::remove_file(&tmp);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
         self_replace::self_replace(&tmp)?;
         let _ = fs::remove_file(&tmp);
     }
+    #[cfg(windows)]
+    {
+        replace_beside(&std::env::current_exe()?, &tmp)?;
+        let _ = fs::remove_file(&tmp);
+    }
     Ok(())
+}
+
+/// Il file della versione vecchia, accanto al programma («grabbit-windows-x86_64.old.exe»).
+pub fn old_copy(exe: &std::path::Path) -> PathBuf {
+    exe.with_extension("old.exe")
+}
+
+/// Sostituisce `exe` (anche se è in uso) con `new`, senza passare dalla cartella Temp né
+/// avviare altri programmi: Windows permette di rinominare un eseguibile aperto, quindi quello
+/// in uso diventa «….old.exe» accanto a sé e quello nuovo prende il suo posto. Il vecchio si
+/// cancella al prossimo avvio (`remove_old_copy`). Se la copia non riesce, si torna indietro.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_beside(exe: &std::path::Path, new: &std::path::Path) -> Result<()> {
+    let old = old_copy(exe);
+    let _ = fs::remove_file(&old);
+    fs::rename(exe, &old)?;
+    if let Err(e) = fs::copy(new, exe) {
+        let _ = fs::remove_file(exe);
+        let _ = fs::rename(&old, exe);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// Dopo un aggiornamento su Windows: cancella la versione vecchia rimasta accanto al programma.
+/// Il processo vecchio può metterci un attimo a chiudersi, quindi si riprova per qualche secondo.
+pub fn remove_old_copy() {
+    if !cfg!(windows) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let old = old_copy(&exe);
+    if !old.exists() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            if fs::remove_file(&old).is_ok() || !old.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
 }
 
 /// Riavvia l'app (dopo un aggiornamento).
@@ -394,6 +444,33 @@ mod tests {
     }
 
     /// GRABBIT_TEST_ASSET_URL=http://127.0.0.1:8767/grabbit-linux-x86_64.AppImage cargo test apply_ -- --ignored
+    /// Il metodo di Windows (provato su ogni sistema): il programma «in uso» diventa
+    /// «….old.exe» accanto a sé e quello nuovo prende il suo posto.
+    #[test]
+    fn exe_is_replaced_beside_itself() {
+        let dir = std::env::temp_dir().join(format!("grabbit-beside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("grabbit-windows-x86_64.exe");
+        let new = dir.join("scaricato.exe");
+        std::fs::write(&exe, b"vecchio").unwrap();
+        std::fs::write(&new, b"nuovo").unwrap();
+        replace_beside(&exe, &new).unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"nuovo");
+        let old = old_copy(&exe);
+        assert_eq!(old, dir.join("grabbit-windows-x86_64.old.exe"));
+        assert_eq!(std::fs::read(&old).unwrap(), b"vecchio");
+        // un secondo aggiornamento sovrascrive il vecchio rimasto
+        std::fs::write(&new, b"ancora piu nuovo").unwrap();
+        replace_beside(&exe, &new).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), b"nuovo");
+        // copia impossibile (file nuovo mancante): si torna al programma di prima
+        std::fs::remove_file(&new).unwrap();
+        assert!(replace_beside(&exe, &new).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"ancora piu nuovo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
